@@ -248,3 +248,15 @@ def test_confirm_returns_true_immediately_when_assume_yes():
 def test_confirm_reads_stdin(monkeypatch, reply, expected):
     monkeypatch.setattr("builtins.input", lambda _: reply)
     assert bulk_register.confirm("go?", assume_yes=False) is expected
+
+
+def test_confirm_treats_eof_as_a_decline(monkeypatch, capsys):
+    """Under nohup or CI without --yes there is nobody to answer."""
+
+    def no_tty(_prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", no_tty)
+
+    assert bulk_register.confirm("go?", assume_yes=False) is False
+    assert "no input available" in capsys.readouterr().err

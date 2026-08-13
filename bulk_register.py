@@ -342,7 +342,14 @@ def format_units(amount: int, decimals: int) -> str:
 def confirm(prompt: str, assume_yes: bool) -> bool:
     if assume_yes:
         return True
-    return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
+    try:
+        reply = input(f"{prompt} [y/N] ")
+    except EOFError:
+        # No terminal — nohup, cron, CI — and no --yes. Declining is the only
+        # safe reading of "nobody is here to answer".
+        print("\nno input available to confirm; not sending", file=sys.stderr)
+        return False
+    return reply.strip().lower() in ("y", "yes")
 
 
 @dataclass
