@@ -12,8 +12,10 @@ from dotenv import load_dotenv
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from web3 import Web3
+from web3.exceptions import TimeExhausted
 
 from sqdreg.networks import NETWORKS
+from sqdreg.runlog import FAILED, PENDING, SUCCESS, Record, RunLog, utc_now
 
 MAX_CONSECUTIVE_FAILURES = 3
 RECEIPT_TIMEOUT = 300
@@ -225,3 +227,141 @@ def confirm(prompt: str, assume_yes: bool) -> bool:
     if assume_yes:
         return True
     return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
+
+
+@dataclass
+class RunResult:
+    """Outcome of a registration loop."""
+
+    registered: int = 0
+    failed: int = 0
+    pending: int = 0
+    gas_used: int = 0
+    aborted: str | None = None
+
+
+def send_tx(w3, account, tx):
+    """Sign and send one transaction, returning its hash."""
+    signed = account.sign_transaction(tx)
+    return w3.eth.send_raw_transaction(signed.raw_transaction)
+
+
+def wait_for(w3, tx_hash) -> dict:
+    """Wait for one receipt. Raises TimeExhausted past RECEIPT_TIMEOUT."""
+    return w3.eth.wait_for_transaction_receipt(tx_hash, timeout=RECEIPT_TIMEOUT)
+
+
+def send_and_wait(w3, account, tx) -> tuple[str, dict]:
+    """Send and wait as one step. For standalone transactions like the approval.
+
+    The registration loop calls send_tx and wait_for separately, because it
+    needs the hash inside its timeout handler.
+    """
+    tx_hash = send_tx(w3, account, tx)
+    return tx_hash.hex(), wait_for(w3, tx_hash)
+
+
+def register_all(w3, account, registry, work, runlog, fees, gas) -> RunResult:
+    """Register each peer in turn, logging every attempt as it resolves."""
+    result = RunResult()
+    nonce = w3.eth.get_transaction_count(account.address)
+    consecutive_failures = 0
+    total = len(work)
+
+    for position, item in enumerate(work, start=1):
+        peer_id = item.entry.peer_id
+        label = f"{peer_id} as {item.name}" if item.name else peer_id
+        tx = registry.build_register(
+            peer_bytes=item.entry.peer_bytes,
+            metadata=item.metadata,
+            nonce=nonce,
+            fees=fees,
+            gas=gas,
+        )
+        print(f"[{position}/{total}] {label}", flush=True)
+
+        try:
+            raw_hash = send_tx(w3, account, tx)
+        except Exception as exc:
+            # Nothing reached the mempool, so the nonce stays free for the
+            # next attempt.
+            runlog.append(
+                Record(
+                    peer_id=peer_id,
+                    status=FAILED,
+                    name=item.name,
+                    error=str(exc),
+                    timestamp=utc_now(),
+                )
+            )
+            result.failed += 1
+            consecutive_failures += 1
+            print(f"  send failed: {exc}", file=sys.stderr)
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                result.aborted = (
+                    f"stopped after {consecutive_failures} consecutive failures"
+                )
+                break
+            continue
+
+        tx_hash = raw_hash.hex()
+
+        try:
+            receipt = wait_for(w3, raw_hash)
+        except TimeExhausted as exc:
+            runlog.append(
+                Record(
+                    peer_id=peer_id,
+                    status=PENDING,
+                    name=item.name,
+                    tx_hash=tx_hash,
+                    timestamp=utc_now(),
+                )
+            )
+            result.pending += 1
+            result.aborted = (
+                "receipt timed out; later transactions would queue behind a "
+                "stuck nonce, so the run stopped"
+            )
+            print(f"  timed out waiting for receipt: {exc}", file=sys.stderr)
+            break
+
+        nonce += 1
+        result.gas_used += receipt["gasUsed"]
+
+        if receipt["status"] == 1:
+            runlog.append(
+                Record(
+                    peer_id=peer_id,
+                    status=SUCCESS,
+                    name=item.name,
+                    tx_hash=tx_hash,
+                    block=receipt["blockNumber"],
+                    timestamp=utc_now(),
+                )
+            )
+            result.registered += 1
+            consecutive_failures = 0
+            print(f"  registered in block {receipt['blockNumber']} ({tx_hash})")
+        else:
+            runlog.append(
+                Record(
+                    peer_id=peer_id,
+                    status=FAILED,
+                    name=item.name,
+                    tx_hash=tx_hash,
+                    block=receipt["blockNumber"],
+                    error="transaction reverted",
+                    timestamp=utc_now(),
+                )
+            )
+            result.failed += 1
+            consecutive_failures += 1
+            print(f"  reverted ({tx_hash})", file=sys.stderr)
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                result.aborted = (
+                    f"stopped after {consecutive_failures} consecutive failures"
+                )
+                break
+
+    return result
