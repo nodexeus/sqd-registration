@@ -184,6 +184,20 @@ def test_approval_is_sent_when_the_allowance_is_short(wired, tmp_path):
     assert registry.build_approve.call_args.kwargs["amount"] == BOND * 2
 
 
+def test_fees_are_recomputed_after_the_confirmation(wired, tmp_path, monkeypatch):
+    """The prompt can sit for minutes; the plan's fee cap goes stale."""
+    fees = MagicMock(return_value={"maxFeePerGas": 200, "maxPriorityFeePerGas": 10})
+    monkeypatch.setattr(bulk_register, "current_fees", fees)
+    path = make_peer_file(tmp_path, 2)
+
+    with patch.object(bulk_register, "register_all") as register_all:
+        register_all.return_value = bulk_register.RunResult(registered=2)
+        bulk_register.main([str(path), "--yes", "--log", str(tmp_path / "l.jsonl")])
+
+    # Once for the plan display, once after the prompt for the real sends.
+    assert fees.call_count == 2
+
+
 def test_gas_is_re_estimated_after_the_approval(wired, tmp_path):
     """The pre-approval estimate is always the fallback on a first run.
 

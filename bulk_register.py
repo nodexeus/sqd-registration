@@ -34,6 +34,18 @@ MAX_CONSECUTIVE_FAILURES = 3
 RECEIPT_TIMEOUT = 300
 GAS_BUFFER_PERCENT = 25
 
+# Arbitrum's suggested priority fee is routinely 0, which would leave
+# maxFeePerGas at exactly 2x the base fee with no tip at all. 0.01 gwei is a
+# rounding error against a ~600,000-gas registration (6e-6 ETH) and keeps every
+# transaction attractive to any node that does order by tip.
+MIN_PRIORITY_FEE_WEI = 10_000_000
+
+# Re-read the fee cap every this many registrations. At roughly one receipt
+# every few seconds, 25 items is a minute or two of wall clock, so the cap is
+# never badly stale; the cost is one get_block per 25 sends (12 extra reads on a
+# 300-node run) versus a stalled run if the base fee doubles mid-flight.
+FEE_REFRESH_INTERVAL = 25
+
 
 def fail(message: str) -> NoReturn:
     """Report a fatal problem and exit without sending anything."""
@@ -241,13 +253,32 @@ def check_funds(registry, count: int) -> FundsCheck:
 
 
 def current_fees(w3) -> dict:
-    """EIP-1559 fees with headroom for a base-fee rise mid-run."""
+    """EIP-1559 fees with headroom for a base-fee rise mid-run.
+
+    2x the base fee is only headroom against the base fee *at the moment of the
+    read*, so callers must refresh this during a long run rather than reuse one
+    result: past the cap nothing mines, every receipt wait burns its full
+    timeout, and the run strands an in-flight transaction.
+    """
     base_fee = w3.eth.get_block("latest").get("baseFeePerGas", 0)
-    priority = w3.eth.max_priority_fee
+    priority = max(w3.eth.max_priority_fee, MIN_PRIORITY_FEE_WEI)
     return {
         "maxFeePerGas": base_fee * 2 + priority,
         "maxPriorityFeePerGas": priority,
     }
+
+
+def refreshed_fees(w3, fees: dict) -> dict:
+    """Re-read fees mid-run, keeping the previous values if the read fails.
+
+    A hiccup on one optional read must not abort a healthy run; the previous cap
+    is still usable and the next refresh will try again.
+    """
+    try:
+        return current_fees(w3)
+    except Exception as exc:  # noqa: BLE001 - any read failure is non-fatal here
+        print(f"warning: could not refresh gas fees: {exc}", file=sys.stderr)
+        return fees
 
 
 def gas_limit_for(registry, work) -> tuple[int, bool]:
@@ -319,6 +350,13 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
     total = len(work)
 
     for position, item in enumerate(work, start=1):
+        # The fee cap was read against one block's base fee; a 300-transaction
+        # run spans 15-30 minutes, and a >2x base-fee rise is ordinary on
+        # Arbitrum under load. Refresh periodically or everything after the rise
+        # sits unmined until its receipt wait times out.
+        if position > 1 and position % FEE_REFRESH_INTERVAL == 1:
+            fees = refreshed_fees(w3, fees)
+
         peer_id = item.entry.peer_id
         label = f"{peer_id} as {item.name}" if item.name else peer_id
         tx = registry.build_register(
@@ -510,6 +548,10 @@ def main(argv: list[str] | None = None) -> int:
     if not confirm(f"\nRegister {len(work)} worker(s) on {network.name}?", args.yes):
         print("aborted")
         return 0
+
+    # The prompt can sit for minutes; the fees above are only headroom over the
+    # base fee at the moment they were read.
+    fees = current_fees(w3)
 
     if funds.needs_approval:
         approve_tx = registry.build_approve(

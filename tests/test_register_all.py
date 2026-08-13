@@ -207,6 +207,36 @@ def test_receipt_timeout_records_pending_and_aborts(tmp_path):
     assert records[0].tx_hash == "0x00"
 
 
+def test_fees_are_refreshed_during_a_long_run(tmp_path, monkeypatch):
+    """One fee read cannot cover a 15-30 minute run.
+
+    maxFeePerGas is only 2x the base fee at the moment it was read, so a
+    sustained rise past the cap would leave every later transaction unmined
+    until its receipt wait timed out.
+    """
+    interval = bulk_register.FEE_REFRESH_INTERVAL
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, account, registry = make_env([1] * (interval + 1))
+    refreshed = {"maxFeePerGas": 999, "maxPriorityFeePerGas": 99}
+    monkeypatch.setattr(bulk_register, "current_fees", lambda _w3: refreshed)
+
+    bulk_register.register_all(
+        w3,
+        account,
+        registry,
+        work(*[f"p{i}" for i in range(interval + 1)]),
+        log,
+        FEES,
+        gas=300000,
+        network="mainnet",
+    )
+
+    used = [c.kwargs["fees"] for c in registry.build_register.call_args_list]
+    assert used[0] == FEES
+    assert used[interval - 1] == FEES
+    assert used[interval] == refreshed
+
+
 def test_send_failure_is_logged_as_failed(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
     w3, account, registry = make_env([1])

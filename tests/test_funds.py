@@ -69,23 +69,47 @@ def test_required_uses_the_limited_count_not_the_file_count():
     assert check.required == BOND * 10
 
 
+FLOOR = bulk_register.MIN_PRIORITY_FEE_WEI
+
+
 def test_current_fees_doubles_base_fee_and_adds_priority():
     w3 = MagicMock()
     w3.eth.get_block.return_value = {"baseFeePerGas": 100}
-    w3.eth.max_priority_fee = 10
+    w3.eth.max_priority_fee = FLOOR * 3
 
     assert bulk_register.current_fees(w3) == {
-        "maxFeePerGas": 210,
-        "maxPriorityFeePerGas": 10,
+        "maxFeePerGas": 200 + FLOOR * 3,
+        "maxPriorityFeePerGas": FLOOR * 3,
     }
 
 
 def test_current_fees_tolerates_a_chain_without_base_fee():
     w3 = MagicMock()
     w3.eth.get_block.return_value = {}
-    w3.eth.max_priority_fee = 10
+    w3.eth.max_priority_fee = FLOOR * 3
 
-    assert bulk_register.current_fees(w3)["maxFeePerGas"] == 10
+    assert bulk_register.current_fees(w3)["maxFeePerGas"] == FLOOR * 3
+
+
+def test_current_fees_floors_a_zero_priority_fee():
+    """Arbitrum suggests 0, which would leave the transaction with no tip."""
+    w3 = MagicMock()
+    w3.eth.get_block.return_value = {"baseFeePerGas": 100}
+    w3.eth.max_priority_fee = 0
+
+    fees = bulk_register.current_fees(w3)
+
+    assert fees["maxPriorityFeePerGas"] == FLOOR
+    assert fees["maxFeePerGas"] == 200 + FLOOR
+
+
+def test_refreshed_fees_keeps_the_previous_cap_when_the_read_fails(capsys):
+    w3 = MagicMock()
+    w3.eth.get_block.side_effect = ConnectionError("rpc down")
+    previous = {"maxFeePerGas": 7, "maxPriorityFeePerGas": 1}
+
+    assert bulk_register.refreshed_fees(w3, previous) == previous
+    assert "could not refresh" in capsys.readouterr().err
 
 
 def test_gas_limit_estimates_against_the_longest_metadata():
