@@ -36,11 +36,47 @@ Provide exactly one credential in `.env` or the environment:
 | `--dry-run` | Run every check, print the plan, send nothing |
 | `--yes` | Skip the confirmation prompt |
 | `--rpc-url` | Override the network's default RPC |
-| `--log` | Result log path (default `<input>.run.jsonl`) |
+| `--log` | Result log path (default `<input>.<network>.run.jsonl`) |
 
 Always `--dry-run` first. It reports the bond total, the estimated gas, whether
 an approval is needed, and exactly which peer IDs would be registered under
 which names.
+
+The gas figure in that plan is approximate, and labelled as such when the wallet
+has no allowance yet: `register()` reverts without an allowance, so gas cannot be
+measured until the approval has landed. The run re-measures gas immediately after
+the approval receipt and prints the limit it will actually use.
+
+## The run log is per network
+
+The log path includes the network (`peer_ids.txt.mainnet.run.jsonl`), and every
+record stores the network it was written for. This matters:
+
+> **Rehearsing on tethys used to be able to cancel the mainnet run.** Registering
+> a file on tethys wrote 300 `success` records; running the same file on mainnet
+> then read them, reported `to register: 0` / `nothing to register`, and exited 0
+> with **zero** mainnet nodes registered. The chain-ID guard does not catch this,
+> because it validates the RPC, not the log.
+
+So rehearse freely: a tethys `success` never satisfies a mainnet run's skip
+filter, and the two runs do not share a log file by default. If you override
+`--log`, the network in each record still keeps the two apart — but give the two
+networks separate paths anyway.
+
+Records written by an earlier version have no network field. Those still count
+for whatever network you are running, so existing logs keep resuming.
+
+## Resuming
+
+Any run that leaves work behind prints the exact command to continue, rebuilt
+from the flags you gave it — `--limit`, `--name-template`, `--log`, `--rpc-url`,
+and `--network` are all echoed back, because dropping any one of them changes
+what a resume spends. `--yes` is deliberately *not* echoed: a resume prompts
+again with its own fresh plan.
+
+Under `--limit`, the on-chain scan stops as soon as the limit is met, so peers
+past that point were never examined. The summary says `up to N ... may still be
+unregistered` in that case rather than asserting a figure it cannot know.
 
 ## Input file
 
@@ -53,6 +89,9 @@ One entry per line, either `peer_id` or `peer_id,name`:
 Blank lines and `#` comments are ignored. Duplicates are collapsed with a
 warning, keeping the first line's name. A name may contain commas; only the
 first comma separates the fields. A line ending in a bare comma is an error.
+
+`peer_ids.txt.example` shows the shape with every line commented out, so it
+cannot be run as-is: an unowned but valid peer ID would still bond 100,000 SQD.
 
 ## Naming
 
@@ -89,14 +128,42 @@ twice against the same file registers ten, then the next ten.
 - Already-registered peer IDs are skipped, so re-running a partly finished file
   wastes no gas.
 - Every attempt is appended to a JSONL log immediately, so an interrupted run
-  resumes cleanly.
+  resumes cleanly. A `success` in the log is *trusted* and not re-checked
+  on-chain — that is what makes a 300-node resume cheap — so in the extremely
+  unlikely event of a reorg past a receipt, that peer ID would be skipped
+  permanently and would need registering by hand.
+- The log is scoped per network; see above.
+- A truncated final line (from a crash mid-write) is reported as an error naming
+  the line, rather than a traceback. Repair that one line; never delete the log,
+  it is the record of what has already been bonded.
 - Three consecutive failures abort the run rather than burning gas down a long
   file.
 - A receipt wait failure stops the run: this covers timeouts and any other
   lookup error. Nonces are sequential, so a stuck transaction would block
   everything behind it. The run logs a `pending` record with the real
-  transaction hash and aborts rather than continuing behind a possibly-stuck
-  nonce.
+  transaction hash and the reason, and aborts rather than continuing behind a
+  possibly-stuck nonce.
+- Transactions are signed before they are sent, so the hash is known even when
+  the send itself fails. A send the node *rejects* is logged `failed` and the run
+  continues on the same nonce. A send that fails at the transport level
+  (connection reset, read timeout) is logged `pending` and stops the run: the
+  node may have accepted the transaction and failed only when replying, so the
+  log must not claim `failed` for a peer that may in fact be registered.
+- Ctrl-C mid-run logs a `pending` record for the in-flight transaction, with its
+  hash, prints the resume command, and exits 130.
+- If the approval itself fails after being broadcast, the run exits 2 naming the
+  approval's hash and tells you to let it settle first: a new run reads the nonce
+  at `latest`, so it would otherwise reuse that nonce and be rejected as an
+  underpriced replacement.
+- `maxFeePerGas` is 2x the base fee at the time of the read, so it is re-read
+  after the confirmation prompt and every 25 registrations. A 300-node run spans
+  15-30 minutes, and once the base fee passes the cap nothing mines.
+  `maxPriorityFeePerGas` has a small floor, since Arbitrum suggests 0.
+- Read-only RPC calls are retried with backoff (a 300-peer scan makes up to 600
+  of them), and a persistent failure exits 2 rather than raising a traceback. No
+  send is ever retried.
+- Without `--yes` and without a terminal (nohup, cron, CI), the confirmation
+  reads EOF and declines.
 
 ## Note on re-registering withdrawn peer IDs
 
