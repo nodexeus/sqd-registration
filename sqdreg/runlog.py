@@ -10,6 +10,10 @@ FAILED = "failed"
 PENDING = "pending"
 
 
+class RunLogError(Exception):
+    """The run log exists but could not be parsed."""
+
+
 def utc_now() -> str:
     """Current time as an ISO-8601 UTC string."""
     return datetime.now(timezone.utc).isoformat()
@@ -47,12 +51,28 @@ class RunLog:
             handle.flush()
 
     def records(self) -> list[Record]:
+        """Every record in the log, in write order.
+
+        A crash mid-`append` can leave a truncated final line, and that is
+        exactly the log a resume reads. Raising a typed error instead of a
+        JSONDecodeError lets the caller name the bad line, so the operator
+        repairs one line rather than deleting the record of what was bonded.
+        """
         if not self.path.exists():
             return []
         records = []
-        for line in self.path.read_text().splitlines():
-            if line.strip():
+        for number, line in enumerate(self.path.read_text().splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
                 records.append(Record(**json.loads(line)))
+            except (ValueError, TypeError) as exc:
+                raise RunLogError(
+                    f"{self.path} line {number} is not a valid record: {exc}. "
+                    "A crash while writing can truncate the last line; repair or "
+                    "remove that one line — do not delete the log, it is the "
+                    "record of what has already been bonded."
+                ) from exc
         return records
 
     def succeeded_peer_ids(self, network: str) -> set[str]:

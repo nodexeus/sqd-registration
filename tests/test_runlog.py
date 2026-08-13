@@ -1,6 +1,16 @@
 import json
 
-from sqdreg.runlog import FAILED, PENDING, SUCCESS, Record, RunLog, utc_now
+import pytest
+
+from sqdreg.runlog import (
+    FAILED,
+    PENDING,
+    SUCCESS,
+    Record,
+    RunLog,
+    RunLogError,
+    utc_now,
+)
 
 
 def test_append_then_read_round_trips(tmp_path):
@@ -74,6 +84,30 @@ def test_the_name_is_persisted(tmp_path):
     log.append(Record(peer_id="peer-a", status=SUCCESS, name="worker-1"))
 
     assert json.loads(path.read_text().splitlines()[0])["name"] == "worker-1"
+
+
+def test_a_truncated_final_line_raises_a_named_error(tmp_path):
+    """A crash mid-append truncates the last line; the resume must say which."""
+    path = tmp_path / "run.jsonl"
+    log = RunLog(path)
+    log.append(Record(peer_id="ok", status=SUCCESS, network="mainnet"))
+    with path.open("a") as handle:
+        handle.write('{"peer_id": "half", "sta')
+
+    with pytest.raises(RunLogError) as exc:
+        log.records()
+
+    assert "line 2" in str(exc.value)
+
+
+def test_an_unknown_field_raises_a_named_error(tmp_path):
+    path = tmp_path / "run.jsonl"
+    path.write_text(json.dumps({"peer_id": "x", "status": SUCCESS, "bogus": 1}) + "\n")
+
+    with pytest.raises(RunLogError) as exc:
+        RunLog(path).records()
+
+    assert "line 1" in str(exc.value)
 
 
 def test_utc_now_is_iso_with_timezone():

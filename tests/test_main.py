@@ -218,6 +218,21 @@ def test_nothing_to_do_exits_cleanly(wired, tmp_path, capsys):
     assert "nothing to register" in capsys.readouterr().out.lower()
 
 
+def test_a_corrupt_run_log_exits_cleanly_without_sending(wired, tmp_path, capsys):
+    """A truncated log is the resume path; a traceback there invites deletion."""
+    _, w3, _ = wired
+    path = make_peer_file(tmp_path, 2)
+    log = tmp_path / "l.jsonl"
+    log.write_text('{"peer_id": "a", "status": "success"}\n{"peer_id": "b", "sta')
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.main([str(path), "--yes", "--log", str(log)])
+
+    assert exc.value.code == 2
+    w3.eth.send_raw_transaction.assert_not_called()
+    assert "line 2" in capsys.readouterr().err
+
+
 def test_a_logged_tethys_success_does_not_cancel_a_mainnet_run(
     wired, tmp_path, capsys
 ):

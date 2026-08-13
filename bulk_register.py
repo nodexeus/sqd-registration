@@ -18,7 +18,15 @@ from sqdreg.naming import NamingError, prepare
 from sqdreg.networks import NETWORKS
 from sqdreg.peerids import PeerIdError, parse_file
 from sqdreg.registry import Registry
-from sqdreg.runlog import FAILED, PENDING, SUCCESS, Record, RunLog, utc_now
+from sqdreg.runlog import (
+    FAILED,
+    PENDING,
+    SUCCESS,
+    Record,
+    RunLog,
+    RunLogError,
+    utc_now,
+)
 
 MAX_CONSECUTIVE_FAILURES = 3
 RECEIPT_TIMEOUT = 300
@@ -421,9 +429,14 @@ def main(argv: list[str] | None = None) -> int:
     except NamingError as exc:
         fail(str(exc))
 
-    work, skipped_logged, skipped_onchain = select_work(
-        prepared, runlog, registry, args.limit, network.name
-    )
+    try:
+        work, skipped_logged, skipped_onchain = select_work(
+            prepared, runlog, registry, args.limit, network.name
+        )
+    except RunLogError as exc:
+        fail(str(exc))
+    except OSError as exc:
+        fail(f"cannot read the run log {log_path}: {exc}")
 
     print(f"network:     {network.name} (chain {network.chain_id})")
     print(f"wallet:      {account.address}")
