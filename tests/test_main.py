@@ -226,6 +226,63 @@ def test_gas_is_re_estimated_after_the_approval(wired, tmp_path):
     assert register_all.call_args.kwargs["gas"] == 600000
 
 
+def test_an_approval_send_failure_exits_cleanly_with_the_hash(wired, tmp_path, capsys):
+    """A broadcast-but-unresolved approval must not be a raw traceback.
+
+    It consumed a nonce that a resume would reuse, so the operator has to be
+    told the hash and told to wait for it to settle.
+    """
+    _, _, registry = wired
+    registry.allowance.return_value = 0
+    path = make_peer_file(tmp_path, 2)
+
+    with patch.object(bulk_register, "send_and_wait") as send_and_wait, patch.object(
+        bulk_register, "register_all"
+    ) as register_all:
+        send_and_wait.side_effect = bulk_register.SendFailed(
+            ConnectionError("connection reset"), "0xapproval"
+        )
+        with pytest.raises(SystemExit) as exc:
+            bulk_register.main([str(path), "--yes", "--log", str(tmp_path / "l.jsonl")])
+
+    assert exc.value.code == 2
+    register_all.assert_not_called()
+    err = capsys.readouterr().err
+    assert "0xapproval" in err
+    assert "connection reset" in err
+
+
+def test_an_approval_failure_without_a_hash_still_exits_cleanly(wired, tmp_path, capsys):
+    _, _, registry = wired
+    registry.allowance.return_value = 0
+    path = make_peer_file(tmp_path, 2)
+
+    with patch.object(bulk_register, "send_and_wait") as send_and_wait:
+        send_and_wait.side_effect = bulk_register.SendFailed(
+            ValueError("cannot sign"), None
+        )
+        with pytest.raises(SystemExit) as exc:
+            bulk_register.main([str(path), "--yes", "--log", str(tmp_path / "l.jsonl")])
+
+    assert exc.value.code == 2
+    assert "approval failed" in capsys.readouterr().err
+
+
+def test_an_interrupted_run_exits_130_with_a_resume_hint(wired, tmp_path, capsys):
+    path = make_peer_file(tmp_path, 3)
+
+    with patch.object(bulk_register, "register_all") as register_all:
+        register_all.return_value = bulk_register.RunResult(
+            registered=1, pending=1, interrupted=True, aborted="interrupted"
+        )
+        code = bulk_register.main(
+            [str(path), "--yes", "--log", str(tmp_path / "l.jsonl")]
+        )
+
+    assert code == 130
+    assert "resume with" in capsys.readouterr().out
+
+
 def test_dry_run_never_sends_the_approval(wired, tmp_path):
     _, w3, registry = wired
     registry.allowance.return_value = 0

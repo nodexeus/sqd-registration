@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from web3 import Web3
-from web3.exceptions import TimeExhausted
+from web3.exceptions import ProviderConnectionError, TimeExhausted
 
 from sqdreg.naming import NamingError, prepare
 from sqdreg.networks import NETWORKS
@@ -319,12 +319,45 @@ class RunResult:
     pending: int = 0
     gas_used: int = 0
     aborted: str | None = None
+    interrupted: bool = False
 
 
-def send_tx(w3, account, tx):
-    """Sign and send one transaction, returning its hash."""
+class SendFailed(Exception):
+    """A transaction could not be sent, or its receipt could not be read.
+
+    Carries the transaction hash whenever signing got far enough to know it, so
+    the caller can name a transaction that may nevertheless be in flight.
+    """
+
+    def __init__(self, cause: BaseException, tx_hash: str | None):
+        super().__init__(str(cause))
+        self.cause = cause
+        self.tx_hash = tx_hash
+
+
+def sign_tx(account, tx) -> tuple[bytes, object]:
+    """Sign one transaction, returning (raw payload, hash).
+
+    The hash comes from the signed payload, not from the send's return value, so
+    it is known *before* the transaction is broadcast. That is the only way an
+    attempt whose send outcome is unknown stays traceable.
+    """
     signed = account.sign_transaction(tx)
-    return w3.eth.send_raw_transaction(signed.raw_transaction)
+    return signed.raw_transaction, signed.hash
+
+
+def is_transport_error(exc: BaseException) -> bool:
+    """Whether a send failure leaves the transaction's fate unknown.
+
+    A JSON-RPC error response means the node evaluated the transaction and
+    refused it: nothing reached the mempool, so the nonce stays free. A
+    transport-level failure — connection reset, read timeout — says nothing,
+    because the node may have accepted the raw transaction and failed only when
+    replying, in which case the nonce is consumed and the peer may in fact be
+    registered. `OSError` covers the stdlib socket errors and requests'
+    exception tree alike, since RequestException subclasses IOError.
+    """
+    return isinstance(exc, (OSError, ProviderConnectionError))
 
 
 def wait_for(w3, tx_hash) -> dict:
@@ -332,14 +365,29 @@ def wait_for(w3, tx_hash) -> dict:
     return w3.eth.wait_for_transaction_receipt(tx_hash, timeout=RECEIPT_TIMEOUT)
 
 
-def send_and_wait(w3, account, tx) -> tuple[str, dict]:
-    """Send and wait as one step. For standalone transactions like the approval.
+def send_and_wait(w3, account, tx, label: str = "transaction") -> tuple[str, dict]:
+    """Sign, send, and wait for one standalone transaction, e.g. the approval.
 
-    The registration loop calls send_tx and wait_for separately, because it
-    needs the hash inside its timeout handler.
+    Raises SendFailed carrying the hash whenever signing got far enough to know
+    it, and prints the hash as soon as the transaction is broadcast, so the
+    operator always ends up holding the hash of anything that may still be in
+    flight — including after a Ctrl-C during the wait.
+
+    The registration loop drives sign/send/wait itself, because it has to tell a
+    rejected send from an unresolved one.
     """
-    tx_hash = send_tx(w3, account, tx)
-    return tx_hash.hex(), wait_for(w3, tx_hash)
+    tx_hash = None
+    try:
+        raw, raw_hash = sign_tx(account, tx)
+        tx_hash = raw_hash.hex()
+        w3.eth.send_raw_transaction(raw)
+    except Exception as exc:
+        raise SendFailed(exc, tx_hash) from exc
+    print(f"  {label} sent ({tx_hash}); waiting for the receipt", flush=True)
+    try:
+        return tx_hash, wait_for(w3, raw_hash)
+    except Exception as exc:
+        raise SendFailed(exc, tx_hash) from exc
 
 
 def register_all(w3, account, registry, work, runlog, fees, gas, network) -> RunResult:
@@ -348,6 +396,26 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
     nonce = w3.eth.get_transaction_count(account.address)
     consecutive_failures = 0
     total = len(work)
+
+    def log_pending(item, tx_hash: str, error: str) -> None:
+        """Record an attempt whose outcome is unknown, with its hash and reason.
+
+        `pending` is the hardest state to diagnose, so the reason is persisted
+        too. A `pending` record never satisfies the skip filter, so the next run
+        re-checks that peer ID on-chain instead of assuming either outcome.
+        """
+        runlog.append(
+            Record(
+                peer_id=item.entry.peer_id,
+                status=PENDING,
+                name=item.name,
+                tx_hash=tx_hash,
+                error=error,
+                timestamp=utc_now(),
+                network=network,
+            )
+        )
+        result.pending += 1
 
     for position, item in enumerate(work, start=1):
         # The fee cap was read against one block's base fee; a 300-transaction
@@ -368,16 +436,47 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
         )
         print(f"[{position}/{total}] {label}", flush=True)
 
+        # Sign before sending so the hash is known even if the send fails: it is
+        # a function of the signed payload, so it identifies the transaction
+        # whether or not the node ever answers.
+        raw, raw_hash = sign_tx(account, tx)
+        tx_hash = raw_hash.hex()
+
         try:
-            raw_hash = send_tx(w3, account, tx)
+            w3.eth.send_raw_transaction(raw)
+        except KeyboardInterrupt:
+            log_pending(item, tx_hash, "interrupted while sending")
+            result.interrupted = True
+            result.aborted = (
+                "interrupted while sending; that transaction may still be in "
+                "flight, so the run stopped"
+            )
+            print("\n  interrupted while sending", file=sys.stderr)
+            break
         except Exception as exc:
-            # Nothing reached the mempool, so the nonce stays free for the
-            # next attempt.
+            if is_transport_error(exc):
+                # The node may have accepted the raw transaction and failed only
+                # when replying, so the nonce may be consumed and this peer may
+                # in fact be registered. Recording `failed` here would be a
+                # confident claim the log cannot support, and anything queued
+                # behind a possibly-consumed nonce is unresolvable, so stop.
+                log_pending(item, tx_hash, str(exc))
+                result.aborted = (
+                    f"send failed at the transport level ({exc}); whether the "
+                    "transaction reached the mempool is unknown, so the run "
+                    "stopped"
+                )
+                print(f"  send outcome unknown: {exc} ({tx_hash})", file=sys.stderr)
+                break
+            # A JSON-RPC error response means the node evaluated the transaction
+            # and refused it, so nothing reached the mempool and the nonce stays
+            # free for the next attempt.
             runlog.append(
                 Record(
                     peer_id=peer_id,
                     status=FAILED,
                     name=item.name,
+                    tx_hash=tx_hash,
                     error=str(exc),
                     timestamp=utc_now(),
                     network=network,
@@ -385,7 +484,7 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
             )
             result.failed += 1
             consecutive_failures += 1
-            print(f"  send failed: {exc}", file=sys.stderr)
+            print(f"  send rejected: {exc}", file=sys.stderr)
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                 result.aborted = (
                     f"stopped after {consecutive_failures} consecutive failures"
@@ -393,27 +492,25 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
                 break
             continue
 
-        tx_hash = raw_hash.hex()
-
         try:
             receipt = wait_for(w3, raw_hash)
+        except KeyboardInterrupt:
+            # The transaction is broadcast and unresolved. Keep its hash rather
+            # than losing it to the interrupt.
+            log_pending(item, tx_hash, "interrupted while waiting for the receipt")
+            result.interrupted = True
+            result.aborted = (
+                "interrupted; the last transaction may still be in flight"
+            )
+            print(f"\n  interrupted, still unresolved ({tx_hash})", file=sys.stderr)
+            break
         except Exception as exc:
             # The transaction was broadcast and its outcome is now unknown,
             # so the nonce is consumed either way. Record the hash — it is
             # the only way to ever resolve this transaction — and abort,
             # because everything queued behind an unresolved nonce is
             # unresolvable too.
-            runlog.append(
-                Record(
-                    peer_id=peer_id,
-                    status=PENDING,
-                    name=item.name,
-                    tx_hash=tx_hash,
-                    timestamp=utc_now(),
-                    network=network,
-                )
-            )
-            result.pending += 1
+            log_pending(item, tx_hash, str(exc))
             if isinstance(exc, TimeExhausted):
                 result.aborted = (
                     "receipt timed out; later transactions would queue behind a "
@@ -560,7 +657,19 @@ def main(argv: list[str] | None = None) -> int:
             fees=fees,
         )
         print("approving bond transfer...")
-        tx_hash, receipt = send_and_wait(w3, account, approve_tx)
+        try:
+            tx_hash, receipt = send_and_wait(
+                w3, account, approve_tx, label="approval"
+            )
+        except SendFailed as exc:
+            named = f" {exc.tx_hash}" if exc.tx_hash else ""
+            fail(
+                f"approval failed: {exc}. Approval transaction{named} may have "
+                "been broadcast and could still mine. Wait for it to settle "
+                "before re-running: a new run reads the nonce at 'latest', "
+                "which excludes a pending approval, so it would reuse that "
+                "nonce and be rejected as an underpriced replacement."
+            )
         if receipt["status"] != 1:
             fail(f"approval reverted ({tx_hash})")
         print(f"  approved ({tx_hash})")
@@ -604,6 +713,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{remaining} peer ID(s) still unregistered; resume with:")
         print(f"  {resume_command(args)}")
 
+    if result.interrupted:
+        return 130
     return 1 if result.failed or result.pending else 0
 
 

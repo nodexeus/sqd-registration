@@ -1,6 +1,8 @@
+from itertools import count
 from unittest.mock import MagicMock
 
-from web3.exceptions import TimeExhausted
+import pytest
+from web3.exceptions import ProviderConnectionError, TimeExhausted
 
 import bulk_register
 from sqdreg.naming import NamedPeer
@@ -26,17 +28,19 @@ def make_env(receipts, start_nonce=5):
     """Build (w3, account, registry) whose receipts follow `receipts`.
 
     Each entry is either a status int (1 success, 0 revert) or an exception
-    instance to raise from wait_for_transaction_receipt.
+    instance to raise from wait_for_transaction_receipt (BaseException, so a
+    KeyboardInterrupt can be simulated too).
+
+    Transaction hashes come from the signer, because the code derives them from
+    the signed payload rather than from the send's return value: 0x00 for the
+    first transaction signed, 0x01 for the second, and so on.
     """
     w3 = MagicMock()
     w3.eth.get_transaction_count.return_value = start_nonce
-    w3.eth.send_raw_transaction.side_effect = [
-        MagicMock(hex=lambda i=i: f"0x{i:02x}") for i in range(len(receipts))
-    ]
 
     def receipt(_tx_hash, timeout=None):
         entry = receipts.pop(0)
-        if isinstance(entry, Exception):
+        if isinstance(entry, BaseException):
             raise entry
         return {"status": entry, "gasUsed": 100, "blockNumber": 1000}
 
@@ -44,6 +48,12 @@ def make_env(receipts, start_nonce=5):
 
     account = MagicMock()
     account.address = "0x0000000000000000000000000000000000000001"
+    signed = count()
+    account.sign_transaction.side_effect = lambda _tx: MagicMock(
+        raw_transaction=b"raw",
+        hash=MagicMock(hex=lambda i=next(signed): f"0x{i:02x}"),
+    )
+
     registry = MagicMock()
     registry.build_register.side_effect = lambda **kwargs: {"nonce": kwargs["nonce"]}
     return w3, account, registry
@@ -205,6 +215,138 @@ def test_receipt_timeout_records_pending_and_aborts(tmp_path):
     # The hash must survive the timeout — it is the only way to resolve the
     # transaction later.
     assert records[0].tx_hash == "0x00"
+
+
+@pytest.mark.parametrize(
+    "exc,unknown",
+    [
+        (ConnectionError("reset"), True),
+        (TimeoutError("read timeout"), True),
+        (OSError("broken pipe"), True),
+        (ProviderConnectionError("no route"), True),
+        (ValueError("execution reverted"), False),
+    ],
+)
+def test_transport_errors_are_the_ones_with_an_unknown_outcome(exc, unknown):
+    assert bulk_register.is_transport_error(exc) is unknown
+
+
+def test_send_and_wait_reports_the_hash_when_the_send_fails():
+    w3, account, _ = make_env([])
+    w3.eth.send_raw_transaction.side_effect = ConnectionError("reset")
+
+    with pytest.raises(bulk_register.SendFailed) as exc:
+        bulk_register.send_and_wait(w3, account, {"nonce": 1}, label="approval")
+
+    assert exc.value.tx_hash == "0x00"
+    assert "reset" in str(exc.value)
+
+
+def test_send_and_wait_reports_the_hash_when_the_receipt_fails(capsys):
+    w3, account, _ = make_env([TimeExhausted("too slow")])
+
+    with pytest.raises(bulk_register.SendFailed) as exc:
+        bulk_register.send_and_wait(w3, account, {"nonce": 1}, label="approval")
+
+    assert exc.value.tx_hash == "0x00"
+    # The hash is printed as soon as it is broadcast, so even a Ctrl-C during
+    # the wait leaves the operator holding it.
+    assert "0x00" in capsys.readouterr().out
+
+
+def test_a_rejected_send_keeps_the_hash_but_stays_failed(tmp_path):
+    """A JSON-RPC rejection is a real failure, but must still be traceable."""
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, account, registry = make_env([1])
+    w3.eth.send_raw_transaction.side_effect = ValueError("nonce too low")
+
+    result = bulk_register.register_all(
+        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+    )
+
+    assert result.failed == 1
+    assert log.records()[0].status == FAILED
+    assert log.records()[0].tx_hash == "0x00"
+
+
+def test_a_transport_level_send_failure_is_pending_not_failed(tmp_path):
+    """A dropped connection does not prove the transaction was refused.
+
+    The node may have accepted the raw transaction and failed only when
+    replying, so the nonce may be consumed and the peer may in fact be
+    registered. Claiming `failed` would make the log actively wrong about a real
+    registration, which is the one thing the log exists to prevent.
+    """
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, account, registry = make_env([1, 1])
+    w3.eth.send_raw_transaction.side_effect = ConnectionError("connection reset")
+
+    result = bulk_register.register_all(
+        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
+    )
+
+    assert (result.pending, result.failed, result.registered) == (1, 0, 0)
+    assert result.aborted is not None
+    records = log.records()
+    assert len(records) == 1
+    assert records[0].status == PENDING
+    assert records[0].tx_hash == "0x00"
+    assert "connection reset" in records[0].error
+
+
+def test_a_pending_record_persists_the_reason(tmp_path):
+    """`pending` is the hardest state to diagnose, so it must carry the why."""
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, account, registry = make_env([TimeExhausted("too slow")])
+
+    bulk_register.register_all(
+        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+    )
+
+    assert "too slow" in log.records()[0].error
+
+
+def test_a_non_timeout_pending_record_persists_the_reason(tmp_path):
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, account, registry = make_env([ConnectionError("rpc 502")])
+
+    bulk_register.register_all(
+        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+    )
+
+    assert "rpc 502" in log.records()[0].error
+
+
+def test_ctrl_c_during_the_receipt_wait_keeps_the_hash(tmp_path):
+    """Ctrl-C must not lose the hash of a broadcast, unresolved transaction."""
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, account, registry = make_env([KeyboardInterrupt(), 1])
+
+    result = bulk_register.register_all(
+        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
+    )
+
+    assert result.interrupted is True
+    assert result.pending == 1
+    records = log.records()
+    assert len(records) == 1
+    assert records[0].status == PENDING
+    assert records[0].tx_hash == "0x00"
+    assert "interrupted" in records[0].error
+
+
+def test_ctrl_c_during_the_send_keeps_the_hash(tmp_path):
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, account, registry = make_env([1])
+    w3.eth.send_raw_transaction.side_effect = KeyboardInterrupt()
+
+    result = bulk_register.register_all(
+        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+    )
+
+    assert result.interrupted is True
+    assert log.records()[0].status == PENDING
+    assert log.records()[0].tx_hash == "0x00"
 
 
 def test_fees_are_refreshed_during_a_long_run(tmp_path, monkeypatch):
