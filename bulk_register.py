@@ -482,11 +482,14 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
 
         # Sign before sending so the hash is known even if the send fails: it is
         # a function of the signed payload, so it identifies the transaction
-        # whether or not the node ever answers.
-        raw, raw_hash = sign_tx(account, tx)
-        tx_hash = raw_hash.hex()
+        # whether or not the node ever answers. A signing failure is local and
+        # leaves tx_hash None, which the handlers below allow for.
+        raw = raw_hash = None
+        tx_hash = None
 
         try:
+            raw, raw_hash = sign_tx(account, tx)
+            tx_hash = raw_hash.hex()
             w3.eth.send_raw_transaction(raw)
         except KeyboardInterrupt:
             log_pending(item, tx_hash, "interrupted while sending")
@@ -498,7 +501,7 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
             print("\n  interrupted while sending", file=sys.stderr)
             break
         except Exception as exc:
-            if is_transport_error(exc):
+            if tx_hash is not None and is_transport_error(exc):
                 # The node may have accepted the raw transaction and failed only
                 # when replying, so the nonce may be consumed and this peer may
                 # in fact be registered. Recording `failed` here would be a
@@ -513,8 +516,9 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
                 print(f"  send outcome unknown: {exc} ({tx_hash})", file=sys.stderr)
                 break
             # A JSON-RPC error response means the node evaluated the transaction
-            # and refused it, so nothing reached the mempool and the nonce stays
-            # free for the next attempt.
+            # and refused it — and a signing failure never reached the node at
+            # all — so nothing reached the mempool and the nonce stays free for
+            # the next attempt.
             runlog.append(
                 Record(
                     peer_id=peer_id,

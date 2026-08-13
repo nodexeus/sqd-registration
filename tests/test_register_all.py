@@ -269,6 +269,22 @@ def test_a_rejected_send_keeps_the_hash_but_stays_failed(tmp_path):
     assert log.records()[0].tx_hash == "0x00"
 
 
+def test_a_signing_failure_is_failed_with_no_hash(tmp_path):
+    """Signing never reaches the node, so the nonce stays free and it is failed."""
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, account, registry = make_env([1, 1])
+    account.sign_transaction.side_effect = ValueError("bad transaction fields")
+
+    result = bulk_register.register_all(
+        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+    )
+
+    assert (result.failed, result.pending) == (1, 0)
+    assert log.records()[0].status == FAILED
+    assert log.records()[0].tx_hash is None
+    w3.eth.send_raw_transaction.assert_not_called()
+
+
 def test_a_transport_level_send_failure_is_pending_not_failed(tmp_path):
     """A dropped connection does not prove the transaction was refused.
 
