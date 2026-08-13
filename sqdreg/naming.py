@@ -2,7 +2,7 @@
 
 The contract stores metadata as an opaque string. The network indexer parses it
 as JSON and exposes the `name` key as the worker's displayed name, so naming a
-node means registering it with `{"name": "..."}`.
+node means registering it with {"name":"..."} (compact JSON, no spaces).
 """
 
 import json
@@ -52,7 +52,7 @@ def encode_metadata(name: str | None) -> str:
     """Encode a name as the metadata string the contract stores."""
     if not name:
         return ""
-    metadata = json.dumps({"name": name}, separators=(",", ":"))
+    metadata = json.dumps({"name": name}, separators=(",", ":"), ensure_ascii=False)
     size = len(metadata.encode())
     if size > MAX_METADATA_BYTES:
         raise NamingError(

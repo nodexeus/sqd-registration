@@ -81,10 +81,19 @@ def test_encode_metadata_rejects_oversized_names():
         encode_metadata("x" * MAX_METADATA_BYTES)
 
 
-def test_encode_metadata_measures_bytes_not_characters():
-    # Each of these is 3 bytes in UTF-8, so 100 of them exceeds nothing, but
-    # 90 plus the JSON wrapper does.
-    name = "あ" * 90
+def test_encode_metadata_accepts_utf8_within_byte_cap():
+    # JSON wrapper {"name":""} is 11 bytes.
+    # 81 × "あ" at 3 bytes each = 243 bytes, total 254 bytes (under 256 cap).
+    # This test discriminates ensure_ascii=False (254 bytes, passes) from ensure_ascii=True (would be 11 + 486 = 497 bytes, fails).
+    name = "あ" * 81
+    metadata = encode_metadata(name)
+    assert len(metadata.encode()) == 254
+    assert json.loads(metadata) == {"name": name}
+
+
+def test_encode_metadata_rejects_utf8_over_byte_cap():
+    # 82 × "あ" at 3 bytes each = 246 bytes, total 257 bytes (over 256 cap).
+    name = "あ" * 82
     with pytest.raises(NamingError):
         encode_metadata(name)
 
