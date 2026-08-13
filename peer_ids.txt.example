@@ -1,0 +1,7 @@
+# One entry per line: either "peer_id" or "peer_id,name".
+# Blank lines and # comments are ignored.
+#
+# Lines with no name fall back to --name-template, if given.
+12D3KooWExamplePeerIdReplaceMe1111111111111111111111,prod-worker-01
+12D3KooWExamplePeerIdReplaceMe2222222222222222222222,prod-worker-02
+12D3KooWExamplePeerIdReplaceMe3333333333333333333333
