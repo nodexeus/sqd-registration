@@ -4,6 +4,8 @@
 import argparse
 import os
 import sys
+from dataclasses import dataclass
+from decimal import Decimal
 from typing import NoReturn
 
 from dotenv import load_dotenv
@@ -150,3 +152,74 @@ def select_work(prepared, runlog, registry, limit):
             break
 
     return work, skipped_logged, skipped_onchain
+
+
+@dataclass
+class FundsCheck:
+    """The bond position for a planned run."""
+
+    bond: int
+    required: int
+    balance: int
+    allowance: int
+    needs_approval: bool
+
+
+def check_funds(registry, count: int) -> FundsCheck:
+    """Verify the wallet can bond `count` workers; exit if it cannot."""
+    bond = registry.bond_amount()
+    required = bond * count
+    balance = registry.sqd_balance()
+    allowance = registry.allowance()
+
+    if balance < required:
+        decimals = registry.token_decimals()
+        fail(
+            f"insufficient SQD: need {format_units(required, decimals)} "
+            f"to bond {count} workers, hold {format_units(balance, decimals)}"
+        )
+
+    return FundsCheck(
+        bond=bond,
+        required=required,
+        balance=balance,
+        allowance=allowance,
+        needs_approval=allowance < required,
+    )
+
+
+def current_fees(w3) -> dict:
+    """EIP-1559 fees with headroom for a base-fee rise mid-run."""
+    base_fee = w3.eth.get_block("latest").get("baseFeePerGas", 0)
+    priority = w3.eth.max_priority_fee
+    return {
+        "maxFeePerGas": base_fee * 2 + priority,
+        "maxPriorityFeePerGas": priority,
+    }
+
+
+def gas_limit_for(registry, work) -> tuple[int, bool]:
+    """Pick one gas limit for every registration in the run.
+
+    Gas scales with metadata length and one limit is reused for the whole run,
+    so the estimate is taken against the *longest* metadata — the most
+    expensive call. A shorter name can then never exceed it. The result is
+    padded to absorb ordinary variation.
+    """
+    longest = max(work, key=lambda candidate: len(candidate.metadata))
+    estimate, exact = registry.estimate_register_gas(
+        longest.entry.peer_bytes, longest.metadata
+    )
+    return estimate + estimate * GAS_BUFFER_PERCENT // 100, exact
+
+
+def format_units(amount: int, decimals: int) -> str:
+    """Render a token amount without trailing zeros."""
+    value = Decimal(amount) / (Decimal(10) ** decimals)
+    return format(value.normalize(), "f")
+
+
+def confirm(prompt: str, assume_yes: bool) -> bool:
+    if assume_yes:
+        return True
+    return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
