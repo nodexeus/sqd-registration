@@ -206,7 +206,9 @@ def gas_limit_for(registry, work) -> tuple[int, bool]:
     expensive call. A shorter name can then never exceed it. The result is
     padded to absorb ordinary variation.
     """
-    longest = max(work, key=lambda candidate: len(candidate.metadata))
+    if not work:
+        fail("no peers to register")
+    longest = max(work, key=lambda candidate: len(candidate.metadata.encode()))
     estimate, exact = registry.estimate_register_gas(
         longest.entry.peer_bytes, longest.metadata
     )

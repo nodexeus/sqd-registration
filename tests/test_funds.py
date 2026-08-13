@@ -116,6 +116,57 @@ def test_gas_limit_reports_an_inexact_estimate():
     assert gas == 500000
 
 
+def test_gas_limit_prefers_longest_metadata_by_byte_length_not_codepoints():
+    """Verify gas_limit_for uses UTF-8 byte length, not Unicode codepoint count.
+
+    When comparing metadata lengths:
+    - Item A: "a" * 25 = 25 ASCII characters = 25 UTF-8 bytes
+    - Item B: "你" * 10 = 10 CJK characters = 30 UTF-8 bytes (3 bytes each)
+
+    By codepoints: A (25) > B (10) — current buggy code picks A
+    By bytes: B (30) > A (25) — correct code picks B
+
+    The test verifies the function calls estimate_register_gas with B's data.
+    """
+    registry = MagicMock()
+    registry.estimate_register_gas.return_value = (200000, True)
+    work = [
+        item("a", "a" * 25),  # 25 codepoints, 25 bytes
+        item("b", "你" * 10),  # 10 codepoints, 30 bytes
+        item("c", ""),
+    ]
+
+    gas, exact = bulk_register.gas_limit_for(registry, work)
+
+    # Should estimate against item "b" (30 bytes is longest), not "a" (25 codepoints is longest)
+    registry.estimate_register_gas.assert_called_once_with(
+        b"b", "你" * 10
+    )
+    assert gas == 250000
+
+
+def test_gas_limit_fails_on_empty_work_list(capsys):
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.gas_limit_for(MagicMock(), [])
+
+    assert exc.value.code == 2
+    assert "no peers" in capsys.readouterr().err
+
+
+def test_gas_limit_truncates_buffer_calculation():
+    """Verify buffer padding uses integer division and doesn't overflow.
+
+    Estimate: 333333, Buffer: 25%
+    Calculation: 333333 + (333333 * 25 // 100) = 333333 + 83333 = 416666
+    """
+    registry = MagicMock()
+    registry.estimate_register_gas.return_value = (333333, True)
+
+    gas, exact = bulk_register.gas_limit_for(registry, [item("a", "")])
+
+    assert gas == 416666
+
+
 def test_format_units_renders_whole_and_fractional_amounts():
     assert bulk_register.format_units(10**18, 18) == "1"
     assert bulk_register.format_units(BOND, 18) == "100000"
