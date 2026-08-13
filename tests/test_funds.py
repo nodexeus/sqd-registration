@@ -25,6 +25,46 @@ def item(peer_id, metadata):
     return NamedPeer(entry=entry, name=None, metadata=metadata)
 
 
+@pytest.fixture(autouse=True)
+def no_backoff_sleep(monkeypatch):
+    """Retry backoff must not slow the suite down."""
+    monkeypatch.setattr(bulk_register.time, "sleep", lambda _seconds: None)
+
+
+def test_read_rpc_retries_a_transient_failure(capsys):
+    call = MagicMock(side_effect=[ConnectionError("429 too many requests"), 7])
+
+    assert bulk_register.read_rpc(call, what="probe") == 7
+    assert call.call_count == 2
+    assert "retrying" in capsys.readouterr().err
+
+
+def test_read_rpc_fails_cleanly_once_retries_are_exhausted(capsys):
+    call = MagicMock(side_effect=ConnectionError("502 bad gateway"))
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.read_rpc(call, what="probe")
+
+    assert exc.value.code == 2
+    assert call.call_count == bulk_register.RPC_ATTEMPTS
+    assert "probe failed after" in capsys.readouterr().err
+
+
+def test_read_rpc_passes_arguments_through():
+    call = MagicMock(return_value=True)
+
+    bulk_register.read_rpc(call, b"peer", what="probe")
+
+    call.assert_called_once_with(b"peer")
+
+
+def test_a_transient_read_failure_does_not_abort_the_funds_check():
+    registry = registry_with(balance=BOND * 5, allowance=BOND * 5)
+    registry.bond_amount.side_effect = [ConnectionError("429"), BOND]
+
+    assert bulk_register.check_funds(registry, count=2).required == BOND * 2
+
+
 def test_sufficient_balance_and_allowance_needs_no_approval():
     check = bulk_register.check_funds(
         registry_with(balance=BOND * 5, allowance=BOND * 5), count=3

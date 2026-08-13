@@ -5,6 +5,7 @@ import argparse
 import os
 import shlex
 import sys
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import NoReturn
@@ -45,6 +46,12 @@ MIN_PRIORITY_FEE_WEI = 10_000_000
 # never badly stale; the cost is one get_block per 25 sends (12 extra reads on a
 # 300-node run) versus a stalled run if the base fee doubles mid-flight.
 FEE_REFRESH_INTERVAL = 25
+
+# Read-only RPC retries. select_work alone makes up to two reads per peer ID —
+# 600 calls for a 300-peer file — against a free public endpoint, so one 429 or
+# transient 502 is likely at this scale and must not end the run.
+RPC_ATTEMPTS = 4
+RPC_BACKOFF_SECONDS = 1.0
 
 
 def fail(message: str) -> NoReturn:
@@ -112,8 +119,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--yes", action="store_true", help="skip the confirmation prompt"
     )
     parser.add_argument("--rpc-url", help="override the network's default RPC endpoint")
-    parser.add_argument("--log", help="result log path (default: <input>.run.jsonl)")
+    parser.add_argument(
+        "--log", help="result log path (default: <input>.<network>.run.jsonl)"
+    )
     return parser.parse_args(argv)
+
+
+def read_rpc(call, *args, what: str):
+    """Run one read-only RPC call, retrying transient failures with backoff.
+
+    Reads are idempotent, so retrying is always safe — this must never wrap a
+    send. Exhaustion is fatal via fail(), keeping this file's error:/exit-2
+    convention instead of a traceback out of a 600-call scan.
+    """
+    delay = RPC_BACKOFF_SECONDS
+    for attempt in range(1, RPC_ATTEMPTS + 1):
+        try:
+            return call(*args)
+        except Exception as exc:
+            if attempt == RPC_ATTEMPTS:
+                fail(f"{what} failed after {RPC_ATTEMPTS} attempts: {exc}")
+            print(
+                f"warning: {what} failed ({exc}); retrying in {delay:g}s",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+            delay *= 2
 
 
 def resume_command(args: argparse.Namespace) -> str:
@@ -208,7 +239,11 @@ def select_work(prepared, runlog, registry, limit, network):
     for item in prepared:
         if item.entry.peer_id in already_done:
             continue
-        if registry.is_registered(item.entry.peer_bytes):
+        if read_rpc(
+            registry.is_registered,
+            item.entry.peer_bytes,
+            what=f"registration lookup for {item.entry.peer_id}",
+        ):
             skipped_onchain.append(item.entry.peer_id)
             continue
         work.append(item)
@@ -231,13 +266,13 @@ class FundsCheck:
 
 def check_funds(registry, count: int) -> FundsCheck:
     """Verify the wallet can bond `count` workers; exit if it cannot."""
-    bond = registry.bond_amount()
+    bond = read_rpc(registry.bond_amount, what="bondAmount() read")
     required = bond * count
-    balance = registry.sqd_balance()
-    allowance = registry.allowance()
+    balance = read_rpc(registry.sqd_balance, what="SQD balance read")
+    allowance = read_rpc(registry.allowance, what="SQD allowance read")
 
     if balance < required:
-        decimals = registry.token_decimals()
+        decimals = read_rpc(registry.token_decimals, what="token decimals read")
         fail(
             f"insufficient SQD: need {format_units(required, decimals)} "
             f"to bond {count} workers, hold {format_units(balance, decimals)}"
@@ -393,7 +428,9 @@ def send_and_wait(w3, account, tx, label: str = "transaction") -> tuple[str, dic
 def register_all(w3, account, registry, work, runlog, fees, gas, network) -> RunResult:
     """Register each peer in turn, logging every attempt as it resolves."""
     result = RunResult()
-    nonce = w3.eth.get_transaction_count(account.address)
+    nonce = read_rpc(
+        w3.eth.get_transaction_count, account.address, what="nonce read"
+    )
     consecutive_failures = 0
     total = len(work)
 
@@ -617,9 +654,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     funds = check_funds(registry, len(work))
-    decimals = registry.token_decimals()
+    decimals = read_rpc(registry.token_decimals, what="token decimals read")
     gas, exact = gas_limit_for(registry, work)
-    fees = current_fees(w3)
+    fees = read_rpc(current_fees, w3, what="fee read")
     gas_cost_wei = gas * fees["maxFeePerGas"] * len(work)
 
     print(f"bond:        {format_units(funds.bond, decimals)} SQD each")
@@ -648,12 +685,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # The prompt can sit for minutes; the fees above are only headroom over the
     # base fee at the moment they were read.
-    fees = current_fees(w3)
+    fees = read_rpc(current_fees, w3, what="fee read")
 
     if funds.needs_approval:
         approve_tx = registry.build_approve(
             amount=funds.required,
-            nonce=w3.eth.get_transaction_count(account.address),
+            nonce=read_rpc(
+                w3.eth.get_transaction_count, account.address, what="nonce read"
+            ),
             fees=fees,
         )
         print("approving bond transfer...")

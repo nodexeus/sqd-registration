@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 import bulk_register
 from sqdreg.naming import NamedPeer
 from sqdreg.peerids import PeerEntry
@@ -21,6 +23,37 @@ def registry_with(registered=()):
     registered = set(registered)
     registry.is_registered.side_effect = lambda raw: raw.decode() in registered
     return registry
+
+
+@pytest.fixture(autouse=True)
+def no_backoff_sleep(monkeypatch):
+    monkeypatch.setattr(bulk_register.time, "sleep", lambda _seconds: None)
+
+
+def test_a_transient_lookup_failure_is_retried(tmp_path, capsys):
+    """600 reads against a public endpoint will hit a 429 sooner or later."""
+    log = RunLog(tmp_path / "run.jsonl")
+    registry = MagicMock()
+    registry.is_registered.side_effect = [ConnectionError("429"), False, False]
+
+    work, _, _ = bulk_register.select_work(
+        prepared("a", "b"), log, registry, None, "mainnet"
+    )
+
+    assert [w.entry.peer_id for w in work] == ["a", "b"]
+    assert "retrying" in capsys.readouterr().err
+
+
+def test_a_persistent_lookup_failure_exits_two(tmp_path, capsys):
+    log = RunLog(tmp_path / "run.jsonl")
+    registry = MagicMock()
+    registry.is_registered.side_effect = ConnectionError("502 bad gateway")
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.select_work(prepared("a"), log, registry, None, "mainnet")
+
+    assert exc.value.code == 2
+    assert "error:" in capsys.readouterr().err
 
 
 def test_returns_everything_when_nothing_is_registered(tmp_path):
