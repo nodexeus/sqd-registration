@@ -308,7 +308,12 @@ def register_all(w3, account, registry, work, runlog, fees, gas) -> RunResult:
 
         try:
             receipt = wait_for(w3, raw_hash)
-        except TimeExhausted as exc:
+        except Exception as exc:
+            # The transaction was broadcast and its outcome is now unknown,
+            # so the nonce is consumed either way. Record the hash — it is
+            # the only way to ever resolve this transaction — and abort,
+            # because everything queued behind an unresolved nonce is
+            # unresolvable too.
             runlog.append(
                 Record(
                     peer_id=peer_id,
@@ -319,11 +324,18 @@ def register_all(w3, account, registry, work, runlog, fees, gas) -> RunResult:
                 )
             )
             result.pending += 1
-            result.aborted = (
-                "receipt timed out; later transactions would queue behind a "
-                "stuck nonce, so the run stopped"
-            )
-            print(f"  timed out waiting for receipt: {exc}", file=sys.stderr)
+            if isinstance(exc, TimeExhausted):
+                result.aborted = (
+                    "receipt timed out; later transactions would queue behind a "
+                    "stuck nonce, so the run stopped"
+                )
+                print(f"  timed out waiting for receipt: {exc}", file=sys.stderr)
+            else:
+                result.aborted = (
+                    f"receipt lookup failed ({exc}); later transactions would "
+                    "queue behind an unresolved nonce, so the run stopped"
+                )
+                print(f"  receipt lookup failed: {exc}", file=sys.stderr)
             break
 
         nonce += 1

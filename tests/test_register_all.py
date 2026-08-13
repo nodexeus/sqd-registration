@@ -108,6 +108,60 @@ def test_a_revert_is_logged_and_the_run_continues(tmp_path):
     assert (result.registered, result.failed) == (1, 1)
     assert [r.status for r in log.records()] == [FAILED, SUCCESS]
     assert result.aborted is None
+    # A revert still costs gas, and gas_used accumulates before the
+    # success/revert branch runs, so a revert's gasUsed must be counted too.
+    assert result.gas_used == 200
+
+
+def test_a_send_failure_mid_run_frees_the_nonce_for_the_next_attempt(tmp_path):
+    """A send failure never reaches the mempool, so its nonce must be reused.
+
+    Regression test: `test_send_failure_is_logged_as_failed` only has one work
+    item, so there is no second `build_register` call whose nonce could be
+    checked. Without this test, moving `nonce += 1` into the send-failure
+    except branch would silently skip a nonce and strand every subsequent
+    transaction in the run, and the rest of the suite would still pass.
+    """
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, account, registry = make_env([1, 1], start_nonce=5)
+    w3.eth.send_raw_transaction.side_effect = [
+        ValueError("boom"),
+        MagicMock(hex=lambda: "0x01"),
+        MagicMock(hex=lambda: "0x02"),
+    ]
+
+    result = bulk_register.register_all(
+        w3, account, registry, work("a", "b", "c"), log, FEES, gas=300000
+    )
+
+    nonces = [c.kwargs["nonce"] for c in registry.build_register.call_args_list]
+    # a's send fails at nonce 5, so it stays free; b reuses nonce 5 and
+    # succeeds; only then does c move on to nonce 6.
+    assert nonces == [5, 5, 6]
+    assert (result.registered, result.failed) == (2, 1)
+
+
+def test_a_non_timeout_receipt_error_records_pending_and_aborts(tmp_path):
+    """Any receipt-lookup failure, not just a timeout, must not lose the hash.
+
+    The transaction was broadcast, so its outcome is unknown but its nonce is
+    consumed either way. Only `wait_for`'s real hash can ever resolve it, so a
+    connection error or RPC 502 must be handled exactly like a timeout: log
+    `pending` with that hash and stop the run.
+    """
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, account, registry = make_env([ConnectionError("connection reset"), 1])
+
+    result = bulk_register.register_all(
+        w3, account, registry, work("a", "b"), log, FEES, gas=300000
+    )
+
+    assert (result.pending, result.registered) == (1, 0)
+    assert result.aborted is not None
+    records = log.records()
+    assert len(records) == 1
+    assert records[0].status == PENDING
+    assert records[0].tx_hash == "0x00"
 
 
 def test_three_consecutive_failures_abort(tmp_path):
