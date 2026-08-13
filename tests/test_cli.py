@@ -112,3 +112,41 @@ def test_connect_exits_on_chain_id_mismatch(capsys):
             bulk_register.connect(NETWORKS["mainnet"], None)
     assert exc.value.code == 2
     assert "42161" in capsys.readouterr().err
+
+
+def test_connect_exits_on_chain_id_mismatch_reverse(capsys):
+    w3 = MagicMock()
+    w3.eth.chain_id = 42161
+    with patch.object(bulk_register, "Web3", return_value=w3):
+        with pytest.raises(SystemExit) as exc:
+            bulk_register.connect(NETWORKS["tethys"], None)
+    assert exc.value.code == 2
+    assert "421614" in capsys.readouterr().err
+
+
+def test_load_signer_exits_on_malformed_private_key(monkeypatch, capsys):
+    malformed_key = "0xNOTAVALIDHEX"
+    monkeypatch.setenv("PRIVATE_KEY", malformed_key)
+    monkeypatch.delenv("MNEMONIC", raising=False)
+    monkeypatch.setattr(bulk_register, "load_dotenv", lambda: None)
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.load_signer()
+    assert exc.value.code == 2
+    stderr = capsys.readouterr().err
+    assert malformed_key not in stderr
+
+
+def test_load_signer_exits_on_malformed_mnemonic(monkeypatch, capsys):
+    malformed_phrase = "banana elephant zebra gamma delta omega"
+    monkeypatch.delenv("PRIVATE_KEY", raising=False)
+    monkeypatch.setenv("MNEMONIC", malformed_phrase)
+    monkeypatch.setattr(bulk_register, "load_dotenv", lambda: None)
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.load_signer()
+    assert exc.value.code == 2
+    stderr = capsys.readouterr().err
+    # Verify no words from the malformed phrase appear in stderr
+    for word in malformed_phrase.split():
+        assert word not in stderr

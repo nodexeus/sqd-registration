@@ -8,6 +8,7 @@ from typing import NoReturn
 
 from dotenv import load_dotenv
 from eth_account import Account
+from eth_account.signers.local import LocalAccount
 from web3 import Web3
 
 from sqdreg.networks import NETWORKS
@@ -76,7 +77,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def load_signer():
+def load_signer() -> LocalAccount:
     """Build the signing account from PRIVATE_KEY or MNEMONIC."""
     load_dotenv()
     private_key = os.getenv("PRIVATE_KEY")
@@ -88,10 +89,16 @@ def load_signer():
             file=sys.stderr,
         )
     if private_key:
-        return Account.from_key(private_key.strip())
+        try:
+            return Account.from_key(private_key.strip())
+        except Exception:
+            fail("PRIVATE_KEY is not a valid private key")
     if mnemonic:
-        Account.enable_unaudited_hdwallet_features()
-        return Account.from_mnemonic(mnemonic.strip())
+        try:
+            Account.enable_unaudited_hdwallet_features()
+            return Account.from_mnemonic(mnemonic.strip())
+        except Exception:
+            fail("MNEMONIC is not a valid BIP-39 phrase")
     fail(
         "neither PRIVATE_KEY nor MNEMONIC is set "
         "(put one in the environment or a .env file)"
