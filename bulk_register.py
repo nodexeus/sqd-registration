@@ -119,3 +119,34 @@ def connect(network, rpc_url: str | None) -> Web3:
             f"expects {network.chain_id}"
         )
     return w3
+
+
+def select_work(prepared, runlog, registry, limit):
+    """Choose which prepared peers to register.
+
+    Drops peers a previous run logged as successful, then drops peers the
+    registry already holds a live registration for. `limit` caps the result
+    *after* both filters, so `--limit 10` always means ten new registrations.
+    The on-chain scan stops once the limit is met to avoid needless RPC calls.
+
+    Returns (work, skipped_logged, skipped_onchain).
+    """
+    already_done = runlog.succeeded_peer_ids()
+    skipped_logged = [
+        item.entry.peer_id for item in prepared if item.entry.peer_id in already_done
+    ]
+
+    work = []
+    skipped_onchain: list[str] = []
+
+    for item in prepared:
+        if item.entry.peer_id in already_done:
+            continue
+        if registry.is_registered(item.entry.peer_bytes):
+            skipped_onchain.append(item.entry.peer_id)
+            continue
+        work.append(item)
+        if limit is not None and len(work) >= limit:
+            break
+
+    return work, skipped_logged, skipped_onchain
