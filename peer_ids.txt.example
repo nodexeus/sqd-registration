@@ -1,7 +1,16 @@
+# Copy this file, uncomment the entries, and replace them with your peer IDs.
+#
 # One entry per line: either "peer_id" or "peer_id,name".
 # Blank lines and # comments are ignored.
-#
 # Lines with no name fall back to --name-template, if given.
-12D3KooWExamplePeerIdReplaceMe1111111111111111111111,prod-worker-01
-12D3KooWExamplePeerIdReplaceMe2222222222222222222222,prod-worker-02
-12D3KooWExamplePeerIdReplaceMe3333333333333333333333
+#
+# The examples below are commented out on purpose. Every line in this file is
+# a commented example, so running the file as-is registers nothing — a valid
+# peer ID that is not yours would still bond 100,000 SQD if it were sent.
+#
+# The IDs are real, decodable ed25519 identity multihashes, so they show the
+# exact shape a line needs; they are still placeholders, not your nodes.
+#
+#12D3KooWAxzCBFVtEyKLnRm43gHxigCoe2d4UmkRTXhBNSv5bcCx,prod-worker-01
+#12D3KooWC7cDcNR4J3NC9y1gTkqafZKmnjCUvrRMxU2LMugGJGgy,prod-worker-02
+#12D3KooWDGEF3VLEM7R3XWGJsqPCcSSjwRmuNw6JTQMVMNSSzwAz

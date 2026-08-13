@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import base58
 import pytest
 
@@ -160,3 +162,34 @@ def test_entry_is_immutable(tmp_path):
     entries, _ = parse_file(path)
     with pytest.raises(dataclasses.FrozenInstanceError):
         entries[0].name = "nope"
+
+
+EXAMPLE_FILE = Path(__file__).resolve().parents[1] / "peer_ids.txt.example"
+
+
+def test_the_shipped_example_file_registers_nothing_as_is():
+    """The example must not be runnable: a valid peer ID would bond 100,000 SQD."""
+    entries, duplicates = parse_file(EXAMPLE_FILE)
+
+    assert entries == []
+    assert duplicates == []
+
+
+def test_the_shipped_example_ids_are_valid_once_uncommented(tmp_path):
+    """Placeholders must be real peer IDs, not text that fails as 'not base58'."""
+    lines = [
+        line.lstrip("#")
+        for line in EXAMPLE_FILE.read_text().splitlines()
+        if line.startswith("#12D3KooW")
+    ]
+    assert len(lines) == 3
+    path = tmp_path / "peers.txt"
+    path.write_text("\n".join(lines) + "\n")
+
+    entries, _ = parse_file(path)
+
+    assert [entry.name for entry in entries] == [
+        "prod-worker-01",
+        "prod-worker-02",
+        None,
+    ]
