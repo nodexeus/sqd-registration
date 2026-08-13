@@ -342,6 +342,38 @@ def test_the_printed_resume_hint_carries_the_bounding_flags(wired, tmp_path, cap
     assert "--yes" not in out
 
 
+def test_a_truncated_scan_reports_an_upper_bound_not_a_figure(
+    wired, tmp_path, capsys
+):
+    """Under --limit the peers past the cap were never examined.
+
+    Measured before the fix: a 256-entry file whose first 50 were unregistered,
+    run with --limit 10, claimed '246 peer ID(s) still unregistered' when 40
+    were left.
+    """
+    path = make_peer_file(tmp_path, 20)
+
+    with patch.object(bulk_register, "register_all") as register_all:
+        register_all.return_value = bulk_register.RunResult(registered=2)
+        bulk_register.main(
+            [str(path), "--yes", "--limit", "2", "--log", str(tmp_path / "l.jsonl")]
+        )
+
+    out = capsys.readouterr().out
+    assert "up to 18 peer ID(s) may still be unregistered" in out
+    assert "18 peer ID(s) still unregistered" not in out
+
+
+def test_a_complete_scan_reports_an_exact_figure(wired, tmp_path, capsys):
+    path = make_peer_file(tmp_path, 5)
+
+    with patch.object(bulk_register, "register_all") as register_all:
+        register_all.return_value = bulk_register.RunResult(registered=2, failed=1)
+        bulk_register.main([str(path), "--yes", "--log", str(tmp_path / "l.jsonl")])
+
+    assert "3 peer ID(s) still unregistered" in capsys.readouterr().out
+
+
 def test_a_corrupt_run_log_exits_cleanly_without_sending(wired, tmp_path, capsys):
     """A truncated log is the resume path; a traceback there invites deletion."""
     _, w3, _ = wired

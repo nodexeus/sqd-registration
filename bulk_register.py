@@ -703,6 +703,12 @@ def main(argv: list[str] | None = None) -> int:
         - len(skipped_onchain)
         - result.registered
     )
+    # select_work stops scanning once --limit is met, so under a limit the peers
+    # past that point were never examined and their status is genuinely unknown.
+    # A precise "246 still unregistered" was a 6x over-report when 40 were left;
+    # only claim a figure when the scan covered the whole file.
+    scan_truncated = args.limit is not None and len(work) >= args.limit
+
     print(
         f"\nregistered {result.registered}, failed {result.failed}, "
         f"pending {result.pending}, gas used {result.gas_used}"
@@ -710,7 +716,13 @@ def main(argv: list[str] | None = None) -> int:
     if result.aborted:
         print(f"run stopped: {result.aborted}", file=sys.stderr)
     if remaining > 0:
-        print(f"{remaining} peer ID(s) still unregistered; resume with:")
+        if scan_truncated:
+            print(
+                f"up to {remaining} peer ID(s) may still be unregistered "
+                f"(--limit stopped the on-chain scan early); resume with:"
+            )
+        else:
+            print(f"{remaining} peer ID(s) still unregistered; resume with:")
         print(f"  {resume_command(args)}")
 
     if result.interrupted:
