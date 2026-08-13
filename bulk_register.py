@@ -523,8 +523,27 @@ def main(argv: list[str] | None = None) -> int:
             fail(f"approval reverted ({tx_hash})")
         print(f"  approved ({tx_hash})")
 
+    # Re-measure gas now that the allowance exists. register() reverts while the
+    # allowance is missing, so estimation reverts too, so on a first run the
+    # figure in the plan above is FALLBACK_REGISTER_GAS rather than a
+    # measurement. After the approval the estimate is real. When no approval was
+    # needed the first estimate was already exact and this simply repeats it,
+    # which keeps one code path.
+    gas, exact = gas_limit_for(registry, work)
+    print(
+        f"gas limit:   {gas} per registration"
+        f"{'' if exact else ' (estimate unavailable, using fallback)'}"
+    )
+
     result = register_all(
-        w3, account, registry, work, runlog, fees, gas, network.name
+        w3,
+        account,
+        registry,
+        work,
+        runlog,
+        fees=fees,
+        gas=gas,
+        network=network.name,
     )
 
     remaining = (

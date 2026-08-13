@@ -184,6 +184,34 @@ def test_approval_is_sent_when_the_allowance_is_short(wired, tmp_path):
     assert registry.build_approve.call_args.kwargs["amount"] == BOND * 2
 
 
+def test_gas_is_re_estimated_after_the_approval(wired, tmp_path):
+    """The pre-approval estimate is always the fallback on a first run.
+
+    register() reverts without an allowance, so estimation reverts too. Only a
+    measurement taken *after* the approval receipt is real, and that is the one
+    the registrations must use — a too-small limit reverts every send
+    out-of-gas.
+    """
+    _, _, registry = wired
+    registry.allowance.return_value = 0
+    registry.estimate_register_gas.side_effect = [(300000, False), (480000, True)]
+    path = make_peer_file(tmp_path, 2)
+
+    with patch.object(bulk_register, "send_and_wait") as send_and_wait, patch.object(
+        bulk_register, "register_all"
+    ) as register_all:
+        send_and_wait.return_value = (
+            "0xapproval",
+            {"status": 1, "gasUsed": 1, "blockNumber": 1},
+        )
+        register_all.return_value = bulk_register.RunResult(registered=2)
+        bulk_register.main([str(path), "--yes", "--log", str(tmp_path / "l.jsonl")])
+
+    assert registry.estimate_register_gas.call_count == 2
+    # 480000 + 25%, the post-approval measurement — not 300000 + 25%.
+    assert register_all.call_args.kwargs["gas"] == 600000
+
+
 def test_dry_run_never_sends_the_approval(wired, tmp_path):
     _, w3, registry = wired
     registry.allowance.return_value = 0
@@ -294,7 +322,7 @@ def test_the_network_reaches_the_registration_loop(wired, tmp_path):
             ]
         )
 
-    assert "tethys" in register_all.call_args.args
+    assert register_all.call_args.kwargs["network"] == "tethys"
 
 
 def test_the_default_log_path_includes_the_network(wired, tmp_path, capsys):

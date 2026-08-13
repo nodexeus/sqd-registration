@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock
 
+from sqdreg.naming import MAX_METADATA_BYTES
 from sqdreg.networks import NETWORKS
 from sqdreg.registry import FALLBACK_REGISTER_GAS, Registry
 
@@ -143,4 +144,20 @@ def test_estimate_register_gas_falls_back_when_estimation_reverts():
     assert registry.estimate_register_gas(PEER, METADATA) == (
         FALLBACK_REGISTER_GAS,
         False,
+    )
+
+
+def test_the_fallback_covers_the_largest_allowed_metadata():
+    """The fallback must be safe on its own, not by luck of the caller's pad.
+
+    Measured on Arbitrum One: 358,661 gas with empty metadata and about 915 gas
+    per additional metadata byte, so the 256-byte cap costs ~592,901. The old
+    350,000 was below even the empty-metadata cost.
+    """
+    empty_metadata_gas = 358_661
+    gas_per_metadata_byte = 915
+
+    assert (
+        FALLBACK_REGISTER_GAS
+        >= empty_metadata_gas + MAX_METADATA_BYTES * gas_per_metadata_byte
     )

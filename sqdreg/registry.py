@@ -2,7 +2,20 @@
 
 from sqdreg.networks import Network
 
-FALLBACK_REGISTER_GAS = 350_000
+# Gas for register() when estimation is unavailable. Measured with read-only
+# eth_estimateGas against Arbitrum One (state overrides supplying the bond
+# balance and allowance; nothing was sent):
+#
+#   metadata ""                            ->  358,661 gas
+#   metadata {"name":"nodexeus-001"} (23B) ->  379,718 gas
+#   metadata 251 bytes                     ->  560,203 gas
+#
+# That is roughly 915 gas per metadata byte on top of a ~358,661 floor, so the
+# 256-byte cap in naming.MAX_METADATA_BYTES costs about
+# 358,661 + 256 * 915 = 592,901. The constant must cover that on its own: the
+# previous 350,000 was below even the empty-metadata cost and only survived
+# because of the caller's 25% pad.
+FALLBACK_REGISTER_GAS = 600_000
 
 # Worker struct field order: creator, peerId, bond, registeredAt,
 # deregisteredAt, metadata.
