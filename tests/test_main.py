@@ -4,6 +4,7 @@ import base58
 import pytest
 
 import bulk_register
+from sqdreg.runlog import SUCCESS, Record, RunLog
 
 BOND = 10**23
 
@@ -215,6 +216,53 @@ def test_nothing_to_do_exits_cleanly(wired, tmp_path, capsys):
     assert code == 0
     w3.eth.send_raw_transaction.assert_not_called()
     assert "nothing to register" in capsys.readouterr().out.lower()
+
+
+def test_a_logged_tethys_success_does_not_cancel_a_mainnet_run(
+    wired, tmp_path, capsys
+):
+    """The whole point of scoping the log: a rehearsal cannot fake completion.
+
+    Registering the file on tethys and then running it on mainnet used to print
+    "nothing to register" and exit 0 with zero mainnet nodes registered.
+    """
+    path = make_peer_file(tmp_path, 2)
+    log = tmp_path / "shared.jsonl"
+    for seed in range(2):
+        RunLog(log).append(
+            Record(peer_id=peer_id_for(seed), status=SUCCESS, network="tethys")
+        )
+
+    code = bulk_register.main([str(path), "--dry-run", "--log", str(log)])
+
+    assert code == 0
+    assert "to register: 2" in capsys.readouterr().out
+
+
+def test_the_network_reaches_the_registration_loop(wired, tmp_path):
+    path = make_peer_file(tmp_path, 1)
+    with patch.object(bulk_register, "register_all") as register_all:
+        register_all.return_value = bulk_register.RunResult(registered=1)
+        bulk_register.main(
+            [
+                str(path),
+                "--yes",
+                "--network",
+                "tethys",
+                "--log",
+                str(tmp_path / "l.jsonl"),
+            ]
+        )
+
+    assert "tethys" in register_all.call_args.args
+
+
+def test_the_default_log_path_includes_the_network(wired, tmp_path, capsys):
+    path = make_peer_file(tmp_path, 1)
+
+    bulk_register.main([str(path), "--dry-run", "--network", "tethys"])
+
+    assert f"{path}.tethys.run.jsonl" in capsys.readouterr().out
 
 
 def test_duplicate_warnings_are_printed(wired, tmp_path, capsys):

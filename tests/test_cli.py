@@ -64,8 +64,18 @@ def test_unknown_network_is_rejected():
         bulk_register.parse_args(["peers.txt", "--network", "nope"])
 
 
-def test_default_log_path_derives_from_input():
-    assert bulk_register.default_log_path("peers.txt") == "peers.txt.run.jsonl"
+def test_default_log_path_derives_from_input_and_network():
+    assert (
+        bulk_register.default_log_path("peers.txt", "mainnet")
+        == "peers.txt.mainnet.run.jsonl"
+    )
+
+
+def test_default_log_paths_differ_between_networks():
+    """A tethys rehearsal must not write into the mainnet run's log."""
+    assert bulk_register.default_log_path(
+        "peers.txt", "tethys"
+    ) != bulk_register.default_log_path("peers.txt", "mainnet")
 
 
 def test_load_signer_prefers_private_key(monkeypatch, capsys):

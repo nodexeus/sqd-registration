@@ -16,7 +16,7 @@ def test_append_then_read_round_trips(tmp_path):
 
 def test_records_is_empty_when_file_absent(tmp_path):
     assert RunLog(tmp_path / "missing.jsonl").records() == []
-    assert RunLog(tmp_path / "missing.jsonl").succeeded_peer_ids() == set()
+    assert RunLog(tmp_path / "missing.jsonl").succeeded_peer_ids("mainnet") == set()
 
 
 def test_append_preserves_existing_records(tmp_path):
@@ -29,11 +29,36 @@ def test_append_preserves_existing_records(tmp_path):
 
 def test_succeeded_excludes_failed_and_pending(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    log.append(Record(peer_id="ok", status=SUCCESS))
-    log.append(Record(peer_id="bad", status=FAILED, error="reverted"))
-    log.append(Record(peer_id="slow", status=PENDING, tx_hash="0xdef"))
+    log.append(Record(peer_id="ok", status=SUCCESS, network="mainnet"))
+    log.append(Record(peer_id="bad", status=FAILED, error="reverted", network="mainnet"))
+    log.append(Record(peer_id="slow", status=PENDING, tx_hash="0xdef", network="mainnet"))
 
-    assert log.succeeded_peer_ids() == {"ok"}
+    assert log.succeeded_peer_ids("mainnet") == {"ok"}
+
+
+def test_a_success_on_another_network_does_not_count(tmp_path):
+    """A tethys rehearsal must never make a mainnet run think it is done."""
+    log = RunLog(tmp_path / "run.jsonl")
+    log.append(Record(peer_id="rehearsed", status=SUCCESS, network="tethys"))
+
+    assert log.succeeded_peer_ids("mainnet") == set()
+    assert log.succeeded_peer_ids("tethys") == {"rehearsed"}
+
+
+def test_a_record_without_a_network_still_counts(tmp_path):
+    """Back-compat: logs written before the network field keep resuming."""
+    path = tmp_path / "run.jsonl"
+    path.write_text(json.dumps({"peer_id": "legacy", "status": SUCCESS}) + "\n")
+
+    assert RunLog(path).succeeded_peer_ids("mainnet") == {"legacy"}
+    assert RunLog(path).succeeded_peer_ids("tethys") == {"legacy"}
+
+
+def test_the_network_is_persisted(tmp_path):
+    path = tmp_path / "run.jsonl"
+    RunLog(path).append(Record(peer_id="peer-a", status=SUCCESS, network="mainnet"))
+
+    assert json.loads(path.read_text().splitlines()[0])["network"] == "mainnet"
 
 
 def test_blank_lines_are_skipped(tmp_path):

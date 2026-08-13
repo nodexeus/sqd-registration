@@ -54,7 +54,7 @@ def test_all_successes_are_logged(tmp_path):
     w3, account, registry = make_env([1, 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b"), log, FEES, gas=300000
+        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.registered, result.failed, result.pending) == (2, 0, 0)
@@ -68,7 +68,7 @@ def test_the_resolved_name_is_logged(tmp_path):
     w3, account, registry = make_env([1])
 
     bulk_register.register_all(
-        w3, account, registry, work("a"), log, FEES, gas=300000
+        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert log.records()[0].name == "worker-a"
@@ -79,7 +79,7 @@ def test_metadata_is_passed_to_the_builder(tmp_path):
     w3, account, registry = make_env([1])
 
     bulk_register.register_all(
-        w3, account, registry, work("a"), log, FEES, gas=300000
+        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert registry.build_register.call_args.kwargs["metadata"] == '{"name":"a"}'
@@ -90,7 +90,7 @@ def test_nonces_increment_by_one_per_transaction(tmp_path):
     w3, account, registry = make_env([1, 1, 1], start_nonce=7)
 
     bulk_register.register_all(
-        w3, account, registry, work("a", "b", "c"), log, FEES, gas=300000
+        w3, account, registry, work("a", "b", "c"), log, FEES, gas=300000, network="mainnet"
     )
 
     nonces = [c.kwargs["nonce"] for c in registry.build_register.call_args_list]
@@ -102,7 +102,7 @@ def test_a_revert_is_logged_and_the_run_continues(tmp_path):
     w3, account, registry = make_env([0, 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b"), log, FEES, gas=300000
+        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.registered, result.failed) == (1, 1)
@@ -131,7 +131,7 @@ def test_a_send_failure_mid_run_frees_the_nonce_for_the_next_attempt(tmp_path):
     ]
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b", "c"), log, FEES, gas=300000
+        w3, account, registry, work("a", "b", "c"), log, FEES, gas=300000, network="mainnet"
     )
 
     nonces = [c.kwargs["nonce"] for c in registry.build_register.call_args_list]
@@ -153,7 +153,7 @@ def test_a_non_timeout_receipt_error_records_pending_and_aborts(tmp_path):
     w3, account, registry = make_env([ConnectionError("connection reset"), 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b"), log, FEES, gas=300000
+        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.pending, result.registered) == (1, 0)
@@ -169,7 +169,7 @@ def test_three_consecutive_failures_abort(tmp_path):
     w3, account, registry = make_env([0, 0, 0, 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b", "c", "d"), log, FEES, gas=300000
+        w3, account, registry, work("a", "b", "c", "d"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.registered, result.failed) == (0, 3)
@@ -182,7 +182,7 @@ def test_a_success_resets_the_failure_counter(tmp_path):
     w3, account, registry = make_env([0, 0, 1, 0, 0, 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b", "c", "d", "e", "f"), log, FEES, gas=300000
+        w3, account, registry, work("a", "b", "c", "d", "e", "f"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.registered, result.failed) == (2, 4)
@@ -194,7 +194,7 @@ def test_receipt_timeout_records_pending_and_aborts(tmp_path):
     w3, account, registry = make_env([TimeExhausted("too slow"), 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b"), log, FEES, gas=300000
+        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.pending, result.registered) == (1, 0)
@@ -213,7 +213,7 @@ def test_send_failure_is_logged_as_failed(tmp_path):
     w3.eth.send_raw_transaction.side_effect = ValueError("nonce too low")
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a"), log, FEES, gas=300000
+        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert result.failed == 1

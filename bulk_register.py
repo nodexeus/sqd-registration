@@ -41,8 +41,14 @@ def positive_int(value: str) -> int:
     return number
 
 
-def default_log_path(peer_id_file: str) -> str:
-    return f"{peer_id_file}.run.jsonl"
+def default_log_path(peer_id_file: str, network: str) -> str:
+    """Default log path for this input file *on this network*.
+
+    The network is part of the name because a log is trusted to say which peer
+    IDs are already done: rehearsing a file on tethys and then running the same
+    file on mainnet must not share one log.
+    """
+    return f"{peer_id_file}.{network}.run.jsonl"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -128,17 +134,18 @@ def connect(network, rpc_url: str | None) -> Web3:
     return w3
 
 
-def select_work(prepared, runlog, registry, limit):
+def select_work(prepared, runlog, registry, limit, network):
     """Choose which prepared peers to register.
 
-    Drops peers a previous run logged as successful, then drops peers the
-    registry already holds a live registration for. `limit` caps the result
-    *after* both filters, so `--limit 10` always means ten new registrations.
-    The on-chain scan stops once the limit is met to avoid needless RPC calls.
+    Drops peers a previous run logged as successful *on this network*, then
+    drops peers the registry already holds a live registration for. `limit`
+    caps the result *after* both filters, so `--limit 10` always means ten new
+    registrations. The on-chain scan stops once the limit is met to avoid
+    needless RPC calls.
 
     Returns (work, skipped_logged, skipped_onchain).
     """
-    already_done = runlog.succeeded_peer_ids()
+    already_done = runlog.succeeded_peer_ids(network)
     skipped_logged = [
         item.entry.peer_id for item in prepared if item.entry.peer_id in already_done
     ]
@@ -264,7 +271,7 @@ def send_and_wait(w3, account, tx) -> tuple[str, dict]:
     return tx_hash.hex(), wait_for(w3, tx_hash)
 
 
-def register_all(w3, account, registry, work, runlog, fees, gas) -> RunResult:
+def register_all(w3, account, registry, work, runlog, fees, gas, network) -> RunResult:
     """Register each peer in turn, logging every attempt as it resolves."""
     result = RunResult()
     nonce = w3.eth.get_transaction_count(account.address)
@@ -295,6 +302,7 @@ def register_all(w3, account, registry, work, runlog, fees, gas) -> RunResult:
                     name=item.name,
                     error=str(exc),
                     timestamp=utc_now(),
+                    network=network,
                 )
             )
             result.failed += 1
@@ -324,6 +332,7 @@ def register_all(w3, account, registry, work, runlog, fees, gas) -> RunResult:
                     name=item.name,
                     tx_hash=tx_hash,
                     timestamp=utc_now(),
+                    network=network,
                 )
             )
             result.pending += 1
@@ -353,6 +362,7 @@ def register_all(w3, account, registry, work, runlog, fees, gas) -> RunResult:
                     tx_hash=tx_hash,
                     block=receipt["blockNumber"],
                     timestamp=utc_now(),
+                    network=network,
                 )
             )
             result.registered += 1
@@ -368,6 +378,7 @@ def register_all(w3, account, registry, work, runlog, fees, gas) -> RunResult:
                     block=receipt["blockNumber"],
                     error="transaction reverted",
                     timestamp=utc_now(),
+                    network=network,
                 )
             )
             result.failed += 1
@@ -385,7 +396,7 @@ def register_all(w3, account, registry, work, runlog, fees, gas) -> RunResult:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     network = NETWORKS[args.network]
-    log_path = args.log or default_log_path(args.peer_id_file)
+    log_path = args.log or default_log_path(args.peer_id_file, network.name)
 
     account = load_signer()
     w3 = connect(network, args.rpc_url)
@@ -411,7 +422,7 @@ def main(argv: list[str] | None = None) -> int:
         fail(str(exc))
 
     work, skipped_logged, skipped_onchain = select_work(
-        prepared, runlog, registry, args.limit
+        prepared, runlog, registry, args.limit, network.name
     )
 
     print(f"network:     {network.name} (chain {network.chain_id})")
@@ -467,7 +478,9 @@ def main(argv: list[str] | None = None) -> int:
             fail(f"approval reverted ({tx_hash})")
         print(f"  approved ({tx_hash})")
 
-    result = register_all(w3, account, registry, work, runlog, fees, gas)
+    result = register_all(
+        w3, account, registry, work, runlog, fees, gas, network.name
+    )
 
     remaining = (
         len(entries)
