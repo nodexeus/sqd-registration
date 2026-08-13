@@ -14,7 +14,10 @@ from eth_account.signers.local import LocalAccount
 from web3 import Web3
 from web3.exceptions import TimeExhausted
 
+from sqdreg.naming import NamingError, prepare
 from sqdreg.networks import NETWORKS
+from sqdreg.peerids import PeerIdError, parse_file
+from sqdreg.registry import Registry
 from sqdreg.runlog import FAILED, PENDING, SUCCESS, Record, RunLog, utc_now
 
 MAX_CONSECUTIVE_FAILURES = 3
@@ -377,3 +380,117 @@ def register_all(w3, account, registry, work, runlog, fees, gas) -> RunResult:
                 break
 
     return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    network = NETWORKS[args.network]
+    log_path = args.log or default_log_path(args.peer_id_file)
+
+    account = load_signer()
+    w3 = connect(network, args.rpc_url)
+    registry = Registry(w3, network, account.address)
+    runlog = RunLog(log_path)
+
+    try:
+        entries, duplicates = parse_file(args.peer_id_file)
+    except PeerIdError as exc:
+        fail(str(exc))
+    except OSError as exc:
+        fail(f"cannot read {args.peer_id_file}: {exc}")
+
+    for warning in duplicates:
+        print(f"warning: {warning}", file=sys.stderr)
+    if not entries:
+        print(f"{args.peer_id_file} contains no peer IDs")
+        return 0
+
+    try:
+        prepared = prepare(entries, args.name_template)
+    except NamingError as exc:
+        fail(str(exc))
+
+    work, skipped_logged, skipped_onchain = select_work(
+        prepared, runlog, registry, args.limit
+    )
+
+    print(f"network:     {network.name} (chain {network.chain_id})")
+    print(f"wallet:      {account.address}")
+    print(f"log:         {log_path}")
+    print(f"in file:     {len(entries)}")
+    print(f"skipped:     {len(skipped_logged)} logged, {len(skipped_onchain)} on-chain")
+    print(f"to register: {len(work)}")
+
+    if not work:
+        print("nothing to register")
+        return 0
+
+    funds = check_funds(registry, len(work))
+    decimals = registry.token_decimals()
+    gas, exact = gas_limit_for(registry, work)
+    fees = current_fees(w3)
+    gas_cost_wei = gas * fees["maxFeePerGas"] * len(work)
+
+    print(f"bond:        {format_units(funds.bond, decimals)} SQD each")
+    print(f"bond total:  {format_units(funds.required, decimals)} SQD")
+    print(f"balance:     {format_units(funds.balance, decimals)} SQD")
+    print(
+        f"gas:         ~{format_units(gas_cost_wei, 18)} ETH max"
+        f"{'' if exact else ' (estimate unavailable, using fallback)'}"
+    )
+    if funds.needs_approval:
+        print(
+            f"approval:    needed — allowance is "
+            f"{format_units(funds.allowance, decimals)} SQD, "
+            f"will approve {format_units(funds.required, decimals)} SQD"
+        )
+
+    if args.dry_run:
+        print("\n-- dry run, nothing sent --")
+        for item in work:
+            print(f"  {item.entry.peer_id} -> {item.name or '(unnamed)'}")
+        return 0
+
+    if not confirm(f"\nRegister {len(work)} worker(s) on {network.name}?", args.yes):
+        print("aborted")
+        return 0
+
+    if funds.needs_approval:
+        approve_tx = registry.build_approve(
+            amount=funds.required,
+            nonce=w3.eth.get_transaction_count(account.address),
+            fees=fees,
+        )
+        print("approving bond transfer...")
+        tx_hash, receipt = send_and_wait(w3, account, approve_tx)
+        if receipt["status"] != 1:
+            fail(f"approval reverted ({tx_hash})")
+        print(f"  approved ({tx_hash})")
+
+    result = register_all(w3, account, registry, work, runlog, fees, gas)
+
+    remaining = (
+        len(entries)
+        - len(skipped_logged)
+        - len(skipped_onchain)
+        - result.registered
+    )
+    print(
+        f"\nregistered {result.registered}, failed {result.failed}, "
+        f"pending {result.pending}, gas used {result.gas_used}"
+    )
+    if result.aborted:
+        print(f"run stopped: {result.aborted}", file=sys.stderr)
+    if remaining > 0:
+        print(f"{remaining} peer ID(s) still unregistered; resume with:")
+        print(f"  {sys.argv[0]} {args.peer_id_file} --network {network.name}")
+
+    return 1 if result.failed or result.pending else 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\ninterrupted; progress is in the run log", file=sys.stderr)
+        raise SystemExit(130) from None
