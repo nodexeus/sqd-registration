@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import shlex
 import sys
 from dataclasses import dataclass
 from decimal import Decimal
@@ -28,6 +29,7 @@ from sqdreg.runlog import (
     utc_now,
 )
 
+PROG = "bulk_register.py"
 MAX_CONSECUTIVE_FAILURES = 3
 RECEIPT_TIMEOUT = 300
 GAS_BUFFER_PERCENT = 25
@@ -61,7 +63,11 @@ def default_log_path(peer_id_file: str, network: str) -> str:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Register SQD worker nodes in bulk from a file of peer IDs."
+        # Fixed rather than derived from sys.argv[0], so usage text and the
+        # resume hint name this script even when main() is called
+        # programmatically from another program.
+        prog=PROG,
+        description="Register SQD worker nodes in bulk from a file of peer IDs.",
     )
     parser.add_argument(
         "peer_id_file", help="file with one 'peer_id' or 'peer_id,name' per line"
@@ -96,6 +102,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rpc-url", help="override the network's default RPC endpoint")
     parser.add_argument("--log", help="result log path (default: <input>.run.jsonl)")
     return parser.parse_args(argv)
+
+
+def resume_command(args: argparse.Namespace) -> str:
+    """The command that continues this run, echoing back every flag given.
+
+    Every flag here bounds what a resume does, so dropping one changes the
+    spend: without `--limit` the plan covers the whole file instead of the cap
+    the operator chose, without `--name-template` the remaining nodes register
+    unnamed (recoverable only one updateMetadata transaction at a time), and
+    without `--log` the resume reads a different log and stops skipping what is
+    already done.
+
+    `--yes` is deliberately *not* echoed even when it was supplied: a resume
+    starts from a new plan with new counts, and that deserves a fresh look.
+    """
+    parts = [PROG, shlex.quote(args.peer_id_file), "--network", args.network]
+    if args.limit is not None:
+        parts += ["--limit", str(args.limit)]
+    if args.name_template:
+        # Quoted, or the shell would try to glob or brace-expand {n:03d}.
+        parts += ["--name-template", shlex.quote(args.name_template)]
+    if args.log:
+        parts += ["--log", shlex.quote(args.log)]
+    if args.rpc_url:
+        parts += ["--rpc-url", shlex.quote(args.rpc_url)]
+    return " ".join(parts)
 
 
 def load_signer() -> LocalAccount:
@@ -509,7 +541,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"run stopped: {result.aborted}", file=sys.stderr)
     if remaining > 0:
         print(f"{remaining} peer ID(s) still unregistered; resume with:")
-        print(f"  {sys.argv[0]} {args.peer_id_file} --network {network.name}")
+        print(f"  {resume_command(args)}")
 
     return 1 if result.failed or result.pending else 0
 

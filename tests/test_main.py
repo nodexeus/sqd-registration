@@ -218,6 +218,31 @@ def test_nothing_to_do_exits_cleanly(wired, tmp_path, capsys):
     assert "nothing to register" in capsys.readouterr().out.lower()
 
 
+def test_the_printed_resume_hint_carries_the_bounding_flags(wired, tmp_path, capsys):
+    path = make_peer_file(tmp_path, 5)
+    log = tmp_path / "l.jsonl"
+    with patch.object(bulk_register, "register_all") as register_all:
+        register_all.return_value = bulk_register.RunResult(registered=1, failed=1)
+        bulk_register.main(
+            [
+                str(path),
+                "--yes",
+                "--limit",
+                "2",
+                "--name-template",
+                "sqd-{n:03d}",
+                "--log",
+                str(log),
+            ]
+        )
+
+    out = capsys.readouterr().out
+    assert "--limit 2" in out
+    assert "--name-template 'sqd-{n:03d}'" in out
+    assert f"--log {log}" in out
+    assert "--yes" not in out
+
+
 def test_a_corrupt_run_log_exits_cleanly_without_sending(wired, tmp_path, capsys):
     """A truncated log is the resume path; a traceback there invites deletion."""
     _, w3, _ = wired

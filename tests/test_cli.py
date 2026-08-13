@@ -78,6 +78,66 @@ def test_default_log_paths_differ_between_networks():
     ) != bulk_register.default_log_path("peers.txt", "mainnet")
 
 
+def test_resume_command_echoes_every_supplied_flag():
+    """Dropping a flag from the hint changes what a resume spends.
+
+    Without --limit the resume plans the whole file instead of the operator's
+    cap; without --name-template the rest of the file registers unnamed;
+    without --log the resume reads a different log and re-registers.
+    """
+    args = bulk_register.parse_args(
+        [
+            "peers.txt",
+            "--network",
+            "tethys",
+            "--limit",
+            "50",
+            "--name-template",
+            "nodexeus-{n:03d}",
+            "--log",
+            "custom.jsonl",
+            "--rpc-url",
+            "http://localhost:8545",
+        ]
+    )
+
+    command = bulk_register.resume_command(args)
+
+    assert command.startswith("bulk_register.py peers.txt")
+    assert "--network tethys" in command
+    assert "--limit 50" in command
+    assert "--name-template 'nodexeus-{n:03d}'" in command
+    assert "--log custom.jsonl" in command
+    assert "--rpc-url http://localhost:8545" in command
+
+
+def test_resume_command_omits_yes_so_a_resume_reprompts():
+    args = bulk_register.parse_args(["peers.txt", "--yes"])
+
+    assert "--yes" not in bulk_register.resume_command(args)
+
+
+def test_resume_command_omits_flags_that_were_not_given():
+    command = bulk_register.resume_command(bulk_register.parse_args(["peers.txt"]))
+
+    assert command == "bulk_register.py peers.txt --network mainnet"
+
+
+def test_resume_command_quotes_a_path_with_spaces():
+    args = bulk_register.parse_args(["my peers.txt"])
+
+    assert "'my peers.txt'" in bulk_register.resume_command(args)
+
+
+def test_resume_command_names_this_script_not_the_caller(monkeypatch):
+    """A programmatic main() must not print the driving script's path."""
+    monkeypatch.setattr(bulk_register.sys, "argv", ["/some/other/driver.py"])
+
+    command = bulk_register.resume_command(bulk_register.parse_args(["peers.txt"]))
+
+    assert command.startswith("bulk_register.py ")
+
+
 def test_load_signer_prefers_private_key(monkeypatch, capsys):
     monkeypatch.setenv("PRIVATE_KEY", KEY)
     monkeypatch.setenv("MNEMONIC", TEST_MNEMONIC)
