@@ -204,10 +204,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--peer-id",
+        action="append",
+        dest="peer_ids",
+        metavar="PEER_ID",
+        help=(
+            "act on this peer ID only, instead of the whole file; repeat for "
+            "several. Each must appear in the file"
+        ),
+    )
+    parser.add_argument(
         "--address",
         help=(
             "wallet to report on for --action status, so no credential is "
-            "needed; ignored by the other actions"
+            "needed. Not valid for the other actions, which act as whoever "
+            "holds the credential"
         ),
     )
     parser.add_argument(
@@ -261,11 +272,16 @@ def resume_command(args: argparse.Namespace) -> str:
     starts from a new plan with new counts, and that deserves a fresh look.
     """
     parts = [PROG, shlex.quote(args.peer_id_file), "--network", args.network]
+    if args.action != REGISTER:
+        parts += ["--action", args.action]
     if args.limit is not None:
         parts += ["--limit", str(args.limit)]
     if args.name_template:
         # Quoted, or the shell would try to glob or brace-expand {n:03d}.
         parts += ["--name-template", shlex.quote(args.name_template)]
+    if args.peer_ids:
+        for peer_id in args.peer_ids:
+            parts += ["--peer-id", shlex.quote(peer_id)]
     if args.log:
         parts += ["--log", shlex.quote(args.log)]
     if args.rpc_url:
@@ -346,6 +362,25 @@ def connect(network, rpc_url: str | None) -> Web3:
             f"expects {network.chain_id}"
         )
     return w3
+
+
+def restrict_to(entries, wanted: list[str]):
+    """Narrow the file to specific peer IDs, rejecting any that are not in it.
+
+    Requiring membership is the point: a typo'd or wrong-network peer ID would
+    otherwise silently select nothing, and "nothing to do" reads exactly like
+    "already done".
+    """
+    present = {e.peer_id for e in entries}
+    unknown = [p for p in wanted if p not in present]
+    if unknown:
+        fail(
+            "--peer-id not found in the input file: "
+            + ", ".join(unknown)
+            + f" ({len(present)} peer ID(s) in the file)"
+        )
+    chosen = set(wanted)
+    return [e for e in entries if e.peer_id in chosen]
 
 
 def l1_block_number(w3) -> int:
@@ -1068,6 +1103,19 @@ def main(argv: list[str] | None = None) -> int:
     network = NETWORKS[args.network]
     log_path = args.log or default_log_path(args.peer_id_file, network.name)
 
+    if args.address:
+        if args.action != STATUS:
+            fail(
+                f"--address only applies to --action status; --action "
+                f"{args.action} acts as whoever holds the credential. "
+                "To act on specific peer IDs use --peer-id."
+            )
+        if not Web3.is_address(args.address):
+            fail(
+                f"--address is not an Ethereum address: {args.address!r}. "
+                "It takes a wallet address (0x...); for a peer ID use --peer-id."
+            )
+
     # Status is read-only, so an address is enough and no key is needed.
     if args.action == STATUS and args.address:
         account = None
@@ -1092,6 +1140,10 @@ def main(argv: list[str] | None = None) -> int:
     if not entries:
         print(f"{args.peer_id_file} contains no peer IDs")
         return 0
+
+    if args.peer_ids:
+        entries = restrict_to(entries, args.peer_ids)
+        print(f"restricted to {len(entries)} of the file's peer ID(s)")
 
     if args.action != REGISTER:
         return run_state_action(args, network, w3, registry, runlog, account,

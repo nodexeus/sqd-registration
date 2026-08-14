@@ -260,13 +260,13 @@ def test_status_needs_no_credential_when_given_an_address(
     path = peer_file(tmp_path, ids)
 
     code = bulk_register.main(
-        [str(path), "--action", "status", "--address", "0xabc"]
+        [str(path), "--action", "status", "--address", "0x000000000000000000000000000000000000dEaD"]
     )
 
     out = capsys.readouterr().out
     assert code == 0
     assert "withdrawable" in out
-    assert "0xabc" in out
+    assert "dEaD" in out
 
 
 def test_status_writes_a_csv_and_totals_the_withdrawable_bond(
@@ -285,7 +285,7 @@ def test_status_writes_a_csv_and_totals_the_withdrawable_bond(
     status_env(monkeypatch, states, tmp_path)
     path = peer_file(tmp_path, ids)
 
-    bulk_register.main([str(path), "--action", "status", "--address", "0xabc"])
+    bulk_register.main([str(path), "--action", "status", "--address", "0x000000000000000000000000000000000000dEaD"])
 
     csv_path = tmp_path / "peers.txt.mainnet.status.csv"
     lines = csv_path.read_text().splitlines()
@@ -302,6 +302,76 @@ def test_status_sends_nothing(monkeypatch, tmp_path):
     w3, _registry = status_env(monkeypatch, [state(ids[0], ACTIVE)], tmp_path)
     path = peer_file(tmp_path, ids)
 
-    bulk_register.main([str(path), "--action", "status", "--address", "0xabc"])
+    bulk_register.main([str(path), "--action", "status", "--address", "0x000000000000000000000000000000000000dEaD"])
 
     w3.eth.send_raw_transaction.assert_not_called()
+
+
+# --- targeting specific peer IDs -------------------------------------------
+
+
+def test_peer_id_narrows_the_file():
+    entries = [entry("a"), entry("b"), entry("c")]
+
+    chosen = bulk_register.restrict_to(entries, ["b"])
+
+    assert [e.peer_id for e in chosen] == ["b"]
+
+
+def test_peer_id_can_be_repeated_and_keeps_file_order():
+    entries = [entry("a"), entry("b"), entry("c")]
+
+    chosen = bulk_register.restrict_to(entries, ["c", "a"])
+
+    assert [e.peer_id for e in chosen] == ["a", "c"]
+
+
+def test_an_unknown_peer_id_is_an_error_not_an_empty_selection(capsys):
+    """Selecting nothing reads exactly like 'already done' — too dangerous."""
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.restrict_to([entry("a")], ["typo"])
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "typo" in err and "not found" in err
+
+
+def test_address_is_rejected_for_a_write_action(tmp_path, capsys):
+    """The reported bug: a peer ID passed to --address was silently ignored,
+    so the run selected every actionable node instead of the one intended."""
+    path = tmp_path / "peers.txt"
+    path.write_text("whatever\n")
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.main(
+            [str(path), "--action", "deregister", "--address", "12D3KooWabc"]
+        )
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--peer-id" in err
+    assert "only applies to --action status" in err
+
+
+def test_a_non_address_is_rejected_even_for_status(tmp_path, capsys):
+    path = tmp_path / "peers.txt"
+    path.write_text("whatever\n")
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.main(
+            [str(path), "--action", "status", "--address", "12D3KooWabc"]
+        )
+
+    assert exc.value.code == 2
+    assert "not an Ethereum address" in capsys.readouterr().err
+
+
+def test_the_resume_hint_carries_peer_id_and_action():
+    args = bulk_register.parse_args(
+        ["peers.txt", "--action", "withdraw", "--peer-id", "a", "--peer-id", "b"]
+    )
+
+    hint = bulk_register.resume_command(args)
+
+    assert "--action withdraw" in hint
+    assert hint.count("--peer-id") == 2

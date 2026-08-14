@@ -71,6 +71,7 @@ instead and tells you to set an environment variable.
 | `--yes` | Skip the confirmation prompt |
 | `--rpc-url` | Override the network's default RPC |
 | `--action` | `register` (default), `deregister`, `withdraw`, or `status` |
+| `--peer-id` | Act on this peer ID only, instead of the whole file; repeat for several |
 | `--address` | Wallet to report on for `--action status`, so no credential is needed |
 | `--log` | Result log path (default `<input>.<network>.run.jsonl`) |
 
@@ -321,6 +322,23 @@ epoch and the bond then stays locked for `lockPeriod`, both **99,999 L1 blocks
 > returns (~25,700,000 against ~494,000,000). Comparing the wrong one marks every
 > locked worker withdrawable, and each `withdraw()` then reverts "Worker is
 > locked". The script reads `l1BlockNumber` for this.
+
+### Acting on one node
+
+`--peer-id` narrows a run to specific peer IDs from the file, which is what you
+want to retry a single failure or rehearse one node:
+
+    .venv/bin/python bulk_register.py peers.txt --action deregister \
+        --network tethys --peer-id 12D3KooW...
+
+Repeat the flag for several. Each must appear in the input file — a peer ID that
+does not is an error rather than an empty selection, because "nothing to do"
+reads exactly like "already done".
+
+`--address` is a *wallet* address and only applies to `--action status`. Passing
+it to a write action is an error: those act as whoever holds the credential, and
+silently ignoring it would run against the whole file instead of the node you
+meant.
 
 ### The log distinguishes actions
 
