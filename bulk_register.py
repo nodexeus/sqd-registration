@@ -10,6 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from decimal import Decimal
+from getpass import getpass
 from typing import NoReturn
 
 from dotenv import load_dotenv
@@ -180,8 +181,49 @@ def resume_command(args: argparse.Namespace) -> str:
     return " ".join(parts)
 
 
+def account_from_secret(secret: str, source: str) -> LocalAccount:
+    """Build an account from a private key or a BIP-39 phrase.
+
+    Whitespace decides which: a phrase has spaces, a key does not. Errors name
+    only `source`, never the value — eth-account's mnemonic error embeds the
+    phrase verbatim, so interpolating it would put the secret on stderr.
+    """
+    secret = secret.strip()
+    if " " in secret:
+        try:
+            Account.enable_unaudited_hdwallet_features()
+            return Account.from_mnemonic(secret)
+        except Exception:
+            fail(f"{source} is not a valid BIP-39 phrase")
+    try:
+        return Account.from_key(secret)
+    except Exception:
+        fail(f"{source} is not a valid private key")
+
+
+def prompt_for_secret() -> LocalAccount:
+    """Ask for a key at the terminal, so none has to exist on disk.
+
+    Only when stdin is a terminal: under cron, nohup or CI a prompt would hang
+    until the run is killed, which is worse than a clear failure.
+    """
+    if not sys.stdin.isatty():
+        fail(
+            "neither PRIVATE_KEY nor MNEMONIC is set, and stdin is not a "
+            "terminal so there is nobody to ask (set one in the environment "
+            "or a .env file)"
+        )
+    try:
+        secret = getpass("Private key or BIP-39 phrase (input hidden): ")
+    except (EOFError, KeyboardInterrupt):
+        fail("no credential provided")
+    if not secret.strip():
+        fail("no credential provided")
+    return account_from_secret(secret, "the credential you entered")
+
+
 def load_signer() -> LocalAccount:
-    """Build the signing account from PRIVATE_KEY or MNEMONIC."""
+    """Build the signing account from PRIVATE_KEY, MNEMONIC, or a prompt."""
     load_dotenv()
     private_key = os.getenv("PRIVATE_KEY")
     mnemonic = os.getenv("MNEMONIC")
@@ -192,20 +234,10 @@ def load_signer() -> LocalAccount:
             file=sys.stderr,
         )
     if private_key:
-        try:
-            return Account.from_key(private_key.strip())
-        except Exception:
-            fail("PRIVATE_KEY is not a valid private key")
+        return account_from_secret(private_key, "PRIVATE_KEY")
     if mnemonic:
-        try:
-            Account.enable_unaudited_hdwallet_features()
-            return Account.from_mnemonic(mnemonic.strip())
-        except Exception:
-            fail("MNEMONIC is not a valid BIP-39 phrase")
-    fail(
-        "neither PRIVATE_KEY nor MNEMONIC is set "
-        "(put one in the environment or a .env file)"
-    )
+        return account_from_secret(mnemonic, "MNEMONIC")
+    return prompt_for_secret()
 
 
 def connect(network, rpc_url: str | None) -> Web3:

@@ -220,3 +220,107 @@ def test_load_signer_exits_on_malformed_mnemonic(monkeypatch, capsys):
     # Verify no words from the malformed phrase appear in stderr
     for word in malformed_phrase.split():
         assert word not in stderr
+
+
+# --- interactive credential prompt -----------------------------------------
+
+
+@pytest.fixture
+def no_env_credentials(monkeypatch):
+    monkeypatch.delenv("PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("MNEMONIC", raising=False)
+    monkeypatch.setattr(bulk_register, "load_dotenv", lambda: None)
+
+
+def tty(monkeypatch, interactive=True):
+    monkeypatch.setattr(bulk_register.sys.stdin, "isatty", lambda: interactive)
+
+
+def test_a_missing_credential_prompts_when_interactive(
+    no_env_credentials, monkeypatch
+):
+    tty(monkeypatch)
+    monkeypatch.setattr(bulk_register, "getpass", lambda _prompt: KEY)
+
+    assert bulk_register.load_signer().address.startswith("0x")
+
+
+def test_the_prompt_accepts_a_mnemonic_too(no_env_credentials, monkeypatch):
+    """Detected by whitespace, so a pasted phrase is not read as a bad key."""
+    tty(monkeypatch)
+    monkeypatch.setattr(bulk_register, "getpass", lambda _prompt: TEST_MNEMONIC)
+
+    # The standard test phrase derives this well-known first account.
+    assert (
+        bulk_register.load_signer().address
+        == "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    )
+
+
+def test_the_prompt_is_hidden(no_env_credentials, monkeypatch):
+    """getpass, never input() — the key must not reach the terminal or history."""
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("used input()"))
+    tty(monkeypatch)
+    monkeypatch.setattr(bulk_register, "getpass", lambda _prompt: KEY)
+
+    bulk_register.load_signer()
+
+
+def test_no_prompt_when_not_a_tty(no_env_credentials, monkeypatch, capsys):
+    """Under cron or nohup a prompt would hang forever; fail fast instead."""
+    tty(monkeypatch, interactive=False)
+    monkeypatch.setattr(
+        bulk_register, "getpass", lambda _prompt: pytest.fail("prompted")
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.load_signer()
+
+    assert exc.value.code == 2
+    assert "not a terminal" in capsys.readouterr().err
+
+
+def test_an_empty_prompt_response_exits(no_env_credentials, monkeypatch):
+    tty(monkeypatch)
+    monkeypatch.setattr(bulk_register, "getpass", lambda _prompt: "   ")
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.load_signer()
+
+    assert exc.value.code == 2
+
+
+def test_an_interrupted_prompt_exits_cleanly(no_env_credentials, monkeypatch):
+    def interrupted(_prompt):
+        raise EOFError
+
+    tty(monkeypatch)
+    monkeypatch.setattr(bulk_register, "getpass", interrupted)
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.load_signer()
+
+    assert exc.value.code == 2
+
+
+def test_a_malformed_prompt_response_does_not_echo_the_secret(
+    no_env_credentials, monkeypatch, capsys
+):
+    tty(monkeypatch)
+    monkeypatch.setattr(bulk_register, "getpass", lambda _prompt: "zebra-canary-xyz")
+
+    with pytest.raises(SystemExit):
+        bulk_register.load_signer()
+
+    err = capsys.readouterr().err
+    assert "zebra" not in err and "canary" not in err
+
+
+def test_env_credentials_still_win_over_prompting(monkeypatch):
+    monkeypatch.setenv("PRIVATE_KEY", KEY)
+    monkeypatch.setattr(bulk_register, "load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        bulk_register, "getpass", lambda _prompt: pytest.fail("prompted")
+    )
+
+    assert bulk_register.load_signer().address.startswith("0x")

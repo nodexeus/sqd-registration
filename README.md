@@ -7,14 +7,25 @@ naming each one.
 
     python3.11 -m venv .venv
     .venv/bin/pip install -r requirements.txt
-    cp .env.example .env      # then put your key in it
+
+**A credential file is optional.** With no `PRIVATE_KEY` or `MNEMONIC` set, the
+script prompts for one at the terminal with the input hidden, so the key never
+has to exist unencrypted on disk — nor in your shell history, nor in `ps`. This
+is the recommended way to run it against a wallet holding real funds:
+
+    .venv/bin/python bulk_register.py peer_ids.txt --dry-run
+    Private key or BIP-39 phrase (input hidden):
+
+The prompt takes either form; a phrase is recognised by its spaces. If you would
+rather use a file, `cp .env.example .env` and fill it in.
 
 **Python 3.10 or newer is required.** The code uses PEP 604 type annotations
 (e.g. `str | None`) which are evaluated at runtime, so Python 3.9 will fail at
 import with a `TypeError`. If your system `python3` is 3.9, invoke the venv
 with an explicit version like `python3.11` or `python3.10` instead.
 
-Provide exactly one credential in `.env` or the environment:
+When you do supply one ahead of time, provide exactly one, in `.env` or the
+environment:
 
 - `PRIVATE_KEY` — hex, with or without `0x`
 - `MNEMONIC` — BIP-39 phrase, 12 or 24 words, derived at `m/44'/60'/0'/0/0`
@@ -30,6 +41,10 @@ account-index option.
 `.env` is gitignored. Nothing but the derived address is ever printed: a
 malformed credential produces a generic error and is never echoed back, so a
 typo'd phrase cannot leak into a terminal log or CI output.
+
+The prompt only appears when stdin is a terminal. Under cron, `nohup` or CI it
+would hang until the run was killed, so there the script fails immediately
+instead and tells you to set an environment variable.
 
 ## Usage
 
