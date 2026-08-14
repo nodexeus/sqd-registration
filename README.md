@@ -48,6 +48,12 @@ typo'd phrase cannot leak into a terminal log or CI output.
 | `--rpc-url` | Override the network's default RPC |
 | `--log` | Result log path (default `<input>.<network>.run.jsonl`) |
 
+Every real run also writes `<input>.<network>.registered.csv` — one row per
+confirmed registration with `peer_id,name,tx_hash,block,registered_at`. It is
+regenerated from the run log each time rather than appended to, so it cannot
+drift out of sync, and it is the record to hand over when the job is done. A
+dry run does not write it: the file asserts that these nodes are registered.
+
 Always `--dry-run` first. It reports the bond total, the estimated gas, whether
 an approval is needed, and exactly which peer IDs would be registered under
 which names.
@@ -114,8 +120,23 @@ from two places, explicit beating generated:
 
 The template supports `{n}` and `{peer_id}`, including format specs, so
 `--name-template 'nodexeus-{n:03d}'` yields `nodexeus-001`, `nodexeus-002`, and
-so on. `{n}` is the peer ID's position in the *file*, not in the work list, so a
-given peer ID gets the same name regardless of which subset a run registers.
+so on.
+
+`{n}` is **the lowest number that name has not already used on this network**,
+read from the run log. Two consequences, both deliberate:
+
+- **Each template starts its own sequence.** Register 100 as
+  `nodexeus-{n:03d}`, then 100 more as `newname-{n:03d}`, and the second group
+  begins at `newname-001` rather than continuing the first group's count.
+- **An interrupted group resumes rather than colliding.** If a run stops after
+  50, the next run with the same template starts at `051`.
+
+A `failed` attempt never landed, so its number is released and reused. A
+`pending` one might have landed, so its number stays taken — reusing it could
+put two workers under the same name.
+
+Names are allocated only to the peers a run actually registers, after the
+already-registered filter, so skipped peers never consume numbers.
 
 Lines with neither register unnamed. The contract's `updateMetadata` can name
 them later without re-bonding, so a missing or wrong name is not permanent.

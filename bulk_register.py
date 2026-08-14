@@ -2,6 +2,7 @@
 """Bulk-register SQD worker nodes from a file of peer IDs."""
 
 import argparse
+import csv
 import json
 import os
 import shlex
@@ -111,8 +112,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--name-template",
         help=(
-            "name for lines without an explicit name; supports {n} "
-            "(file position) and {peer_id}, e.g. 'nodexeus-{n:03d}'"
+            "name for lines without an explicit name; supports {n} (the next "
+            "number this template has not used) and {peer_id}, "
+            "e.g. 'nodexeus-{n:03d}'"
         ),
     )
     parser.add_argument(
@@ -222,8 +224,8 @@ def connect(network, rpc_url: str | None) -> Web3:
     return w3
 
 
-def select_work(prepared, runlog, registry, limit, network):
-    """Choose which prepared peers to register.
+def select_work(entries, runlog, registry, limit, network):
+    """Choose which peer entries to register.
 
     Drops peers a previous run logged as successful *on this network*, then
     drops peers the registry already holds a live registration for. `limit`
@@ -231,27 +233,29 @@ def select_work(prepared, runlog, registry, limit, network):
     registrations. The on-chain scan stops once the limit is met to avoid
     needless RPC calls.
 
+    Filtering happens before naming, deliberately: template numbers are handed
+    out from the first unused value, so allocating them to peers that are
+    already registered would burn numbers and shift every later name.
+
     Returns (work, skipped_logged, skipped_onchain).
     """
     already_done = runlog.succeeded_peer_ids(network)
-    skipped_logged = [
-        item.entry.peer_id for item in prepared if item.entry.peer_id in already_done
-    ]
+    skipped_logged = [e.peer_id for e in entries if e.peer_id in already_done]
 
     work = []
     skipped_onchain: list[str] = []
 
-    for item in prepared:
-        if item.entry.peer_id in already_done:
+    for entry in entries:
+        if entry.peer_id in already_done:
             continue
         if read_rpc(
             registry.is_registered,
-            item.entry.peer_bytes,
-            what=f"registration lookup for {item.entry.peer_id}",
+            entry.peer_bytes,
+            what=f"registration lookup for {entry.peer_id}",
         ):
-            skipped_onchain.append(item.entry.peer_id)
+            skipped_onchain.append(entry.peer_id)
             continue
-        work.append(item)
+        work.append(entry)
         if limit is not None and len(work) >= limit:
             break
 
@@ -290,6 +294,31 @@ def check_funds(registry, count: int) -> FundsCheck:
         allowance=allowance,
         needs_approval=allowance < required,
     )
+
+
+CSV_COLUMNS = ("peer_id", "name", "tx_hash", "block", "registered_at")
+
+
+def default_csv_path(peer_id_file: str, network: str) -> str:
+    return f"{peer_id_file}.{network}.registered.csv"
+
+
+def write_registered_csv(path: str, runlog, network: str) -> int:
+    """Rewrite the CSV of confirmed registrations from the log.
+
+    Derived, never appended to in parallel: the JSONL log is the single
+    write-ahead record, and regenerating from it each run means the two cannot
+    drift apart. Returns the row count.
+    """
+    rows = runlog.registered(network)
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(CSV_COLUMNS)
+        for r in rows:
+            writer.writerow(
+                [r.peer_id, r.name or "", r.tx_hash or "", r.block or "", r.timestamp or ""]
+            )
+    return len(rows)
 
 
 @dataclass
@@ -684,19 +713,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{args.peer_id_file} contains no peer IDs")
         return 0
 
+    # Filter first, then name: numbers are handed out from the first unused
+    # value, so naming peers that are about to be skipped would burn them.
     try:
-        prepared = prepare(entries, args.name_template)
-    except NamingError as exc:
-        fail(str(exc))
-
-    try:
-        work, skipped_logged, skipped_onchain = select_work(
-            prepared, runlog, registry, args.limit, network.name
+        selected, skipped_logged, skipped_onchain = select_work(
+            entries, runlog, registry, args.limit, network.name
         )
+        # Names already claimed on this network, plus every explicit name in the
+        # file — including on lines this run will not touch, so a generated name
+        # can never collide with one waiting further down the list.
+        taken = runlog.used_names(network.name) | {e.name for e in entries if e.name}
     except RunLogError as exc:
         fail(str(exc))
     except OSError as exc:
         fail(f"cannot read the run log {log_path}: {exc}")
+
+    try:
+        work = prepare(selected, args.name_template, taken)
+    except NamingError as exc:
+        fail(str(exc))
 
     print(f"network:     {network.name} (chain {network.chain_id})")
     print(f"wallet:      {account.address}")
@@ -803,6 +838,15 @@ def main(argv: list[str] | None = None) -> int:
         gas=gas,
         network=network.name,
     )
+
+    # Regenerated from the log after every real run, so the operator always has
+    # a current record even if the run aborted partway.
+    csv_path = default_csv_path(args.peer_id_file, network.name)
+    try:
+        rows = write_registered_csv(csv_path, runlog, network.name)
+        print(f"\nregistered nodes written to {csv_path} ({rows} rows)")
+    except OSError as exc:
+        print(f"warning: could not write {csv_path}: {exc}", file=sys.stderr)
 
     remaining = (
         len(entries)

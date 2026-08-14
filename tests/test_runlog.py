@@ -114,3 +114,41 @@ def test_utc_now_is_iso_with_timezone():
     stamp = utc_now()
     assert "T" in stamp
     assert stamp.endswith("+00:00")
+
+
+def test_used_names_counts_success_and_pending_but_not_failed(tmp_path):
+    """A failed send never landed, so its number is free to reuse.
+
+    A pending one may have landed — reusing that number would put two workers
+    under the same name.
+    """
+    log = RunLog(tmp_path / "run.jsonl")
+    log.append(Record(peer_id="a", status=SUCCESS, name="sqd-001", network="mainnet"))
+    log.append(Record(peer_id="b", status=FAILED, name="sqd-002", network="mainnet"))
+    log.append(Record(peer_id="c", status=PENDING, name="sqd-003", network="mainnet"))
+
+    assert log.used_names("mainnet") == {"sqd-001", "sqd-003"}
+
+
+def test_used_names_is_scoped_by_network(tmp_path):
+    log = RunLog(tmp_path / "run.jsonl")
+    log.append(Record(peer_id="a", status=SUCCESS, name="sqd-001", network="tethys"))
+
+    assert log.used_names("mainnet") == set()
+    assert log.used_names("tethys") == {"sqd-001"}
+
+
+def test_used_names_ignores_unnamed_records(tmp_path):
+    log = RunLog(tmp_path / "run.jsonl")
+    log.append(Record(peer_id="a", status=SUCCESS, network="mainnet"))
+
+    assert log.used_names("mainnet") == set()
+
+
+def test_registered_returns_only_successes_in_order(tmp_path):
+    log = RunLog(tmp_path / "run.jsonl")
+    log.append(Record(peer_id="a", status=SUCCESS, name="one", network="mainnet"))
+    log.append(Record(peer_id="b", status=FAILED, name="two", network="mainnet"))
+    log.append(Record(peer_id="c", status=SUCCESS, name="three", network="mainnet"))
+
+    assert [r.peer_id for r in log.registered("mainnet")] == ["a", "c"]

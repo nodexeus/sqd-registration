@@ -356,3 +356,53 @@ def test_a_thousand_registrations_needs_well_under_a_tenth_of_an_eth():
 
     assert check.sufficient is True
     assert check.required < 10**17 // 2  # comfortably under 0.05 ETH
+
+
+# --- registered CSV --------------------------------------------------------
+
+
+def test_the_csv_is_derived_from_the_log(tmp_path):
+    from sqdreg.runlog import SUCCESS, FAILED, Record, RunLog
+
+    log = RunLog(tmp_path / "run.jsonl")
+    log.append(
+        Record(
+            peer_id="a",
+            status=SUCCESS,
+            name="sqd-001",
+            tx_hash="0xaa",
+            block=10,
+            timestamp="2026-08-14T00:00:00+00:00",
+            network="mainnet",
+        )
+    )
+    log.append(Record(peer_id="b", status=FAILED, name="sqd-002", network="mainnet"))
+    out = tmp_path / "reg.csv"
+
+    rows = bulk_register.write_registered_csv(str(out), log, "mainnet")
+
+    lines = out.read_text().splitlines()
+    assert rows == 1
+    assert lines[0] == "peer_id,name,tx_hash,block,registered_at"
+    assert lines[1] == "a,sqd-001,0xaa,10,2026-08-14T00:00:00+00:00"
+    assert len(lines) == 2  # the failed attempt is not a registration
+
+
+def test_the_csv_is_rewritten_not_appended(tmp_path):
+    from sqdreg.runlog import SUCCESS, Record, RunLog
+
+    log = RunLog(tmp_path / "run.jsonl")
+    log.append(Record(peer_id="a", status=SUCCESS, name="x", network="mainnet"))
+    out = tmp_path / "reg.csv"
+
+    bulk_register.write_registered_csv(str(out), log, "mainnet")
+    bulk_register.write_registered_csv(str(out), log, "mainnet")
+
+    assert len(out.read_text().splitlines()) == 2  # header + one row, not two
+
+
+def test_the_csv_path_includes_the_network():
+    assert (
+        bulk_register.default_csv_path("peers.txt", "tethys")
+        == "peers.txt.tethys.registered.csv"
+    )

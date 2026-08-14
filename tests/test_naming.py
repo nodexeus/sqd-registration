@@ -120,9 +120,68 @@ def test_prepare_with_no_template_leaves_unnamed_entries_empty():
     assert [p.metadata for p in prepared] == ["", '{"name":"named"}']
 
 
-def test_prepare_uses_file_index_not_list_position():
+def test_numbering_starts_at_one_regardless_of_file_position():
+    """`{n}` counts allocations, not line numbers.
+
+    Callers pass only the entries they are about to register, so a group that
+    happens to sit at lines 3-4 of the file still numbers from 1.
+    """
     entries = [entry(peer_id="c", index=3), entry(peer_id="d", index=4)]
 
     prepared = prepare(entries, "sqd-{n}")
 
-    assert [p.name for p in prepared] == ["sqd-3", "sqd-4"]
+    assert [p.name for p in prepared] == ["sqd-1", "sqd-2"]
+
+
+def test_numbering_skips_names_already_used():
+    """Resuming an interrupted group continues instead of colliding from 1."""
+    entries = [entry(peer_id="c"), entry(peer_id="d")]
+
+    prepared = prepare(entries, "sqd-{n:03d}", used_names={"sqd-001", "sqd-002"})
+
+    assert [p.name for p in prepared] == ["sqd-003", "sqd-004"]
+
+
+def test_a_different_template_starts_its_own_sequence():
+    """The whole point: a second group is not continued from the first."""
+    entries = [entry(peer_id="c"), entry(peer_id="d")]
+    used = {f"nodexeus-{i:03d}" for i in range(1, 101)}
+
+    prepared = prepare(entries, "newname-{n:03d}", used_names=used)
+
+    assert [p.name for p in prepared] == ["newname-001", "newname-002"]
+
+
+def test_numbering_fills_a_gap_left_by_a_failed_registration():
+    """A failed send never landed, so its number is genuinely free."""
+    entries = [entry(peer_id="c"), entry(peer_id="d")]
+
+    prepared = prepare(entries, "sqd-{n:03d}", used_names={"sqd-001", "sqd-003"})
+
+    assert [p.name for p in prepared] == ["sqd-002", "sqd-004"]
+
+
+def test_an_explicit_name_is_never_renumbered_and_reserves_itself():
+    entries = [entry(peer_id="c", name="sqd-001"), entry(peer_id="d")]
+
+    prepared = prepare(entries, "sqd-{n:03d}")
+
+    assert [p.name for p in prepared] == ["sqd-001", "sqd-002"]
+
+
+def test_a_generated_name_cannot_collide_with_a_reserved_explicit_name():
+    """Explicit names further down the file are passed in as used."""
+    entries = [entry(peer_id="c"), entry(peer_id="d")]
+
+    prepared = prepare(entries, "sqd-{n:03d}", used_names={"sqd-002"})
+
+    assert [p.name for p in prepared] == ["sqd-001", "sqd-003"]
+
+
+def test_a_template_without_n_does_not_hang():
+    """Searching for an unused value would never terminate; it must not try."""
+    entries = [entry(peer_id="c"), entry(peer_id="d")]
+
+    prepared = prepare(entries, "fixed-{peer_id}", used_names={"fixed-c"})
+
+    assert [p.name for p in prepared] == ["fixed-c", "fixed-d"]

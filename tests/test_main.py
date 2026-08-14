@@ -494,3 +494,110 @@ def test_the_eth_budget_covers_the_approval_when_one_is_needed(wired, tmp_path, 
         w3, "0xabc", gas=gas, fees=fees, count=2, needs_approval=True
     )
     assert check.required > without_approval
+
+
+def test_each_template_starts_its_own_sequence_across_runs(wired, tmp_path):
+    """Two groups from one unnamed peer ID list, each numbered from 001.
+
+    The operator hands over a plain list of peer IDs and chooses the naming at
+    run time: 5 as nodexeus-001..005, then 5 as newname-001..005. Under the old
+    file-position rule the second group would have come out newname-006..010.
+    """
+    _, _, registry = wired
+    path = make_peer_file(tmp_path, 10)
+    log = tmp_path / "l.jsonl"
+
+    def run(template):
+        captured = {}
+        with patch.object(bulk_register, "register_all") as register_all:
+            def record(w3, account, reg, work, runlog, fees, gas, network):
+                captured["names"] = [w.name for w in work]
+                for w in work:
+                    runlog.append(
+                        Record(
+                            peer_id=w.entry.peer_id,
+                            status=SUCCESS,
+                            name=w.name,
+                            network=network,
+                        )
+                    )
+                return bulk_register.RunResult(registered=len(work))
+
+            register_all.side_effect = record
+            bulk_register.main(
+                [str(path), "--yes", "--limit", "5",
+                 "--name-template", template, "--log", str(log)]
+            )
+        return captured["names"]
+
+    assert run("nodexeus-{n:03d}") == [f"nodexeus-{i:03d}" for i in range(1, 6)]
+    assert run("newname-{n:03d}") == [f"newname-{i:03d}" for i in range(1, 6)]
+
+
+def test_an_interrupted_group_resumes_its_numbering(wired, tmp_path):
+    """The property the old file-position rule existed to protect."""
+    path = make_peer_file(tmp_path, 10)
+    log = RunLog(tmp_path / "l.jsonl")
+    for seed in range(3):
+        log.append(
+            Record(
+                peer_id=peer_id_for(seed),
+                status=SUCCESS,
+                name=f"sqd-{seed + 1:03d}",
+                network="mainnet",
+            )
+        )
+
+    captured = {}
+    with patch.object(bulk_register, "register_all") as register_all:
+
+        def record(w3, account, reg, work, runlog, fees, gas, network):
+            captured["names"] = [w.name for w in work]
+            return bulk_register.RunResult(registered=len(work))
+
+        register_all.side_effect = record
+        bulk_register.main(
+            [str(path), "--yes", "--limit", "3",
+             "--name-template", "sqd-{n:03d}", "--log", str(tmp_path / "l.jsonl")]
+        )
+
+    assert captured["names"] == ["sqd-004", "sqd-005", "sqd-006"]
+
+
+def test_a_real_run_writes_the_registered_csv(wired, tmp_path):
+    path = make_peer_file(tmp_path, 2)
+    with patch.object(bulk_register, "register_all") as register_all:
+        def record(w3, account, reg, work, runlog, fees, gas, network):
+            for w in work:
+                runlog.append(
+                    Record(
+                        peer_id=w.entry.peer_id,
+                        status=SUCCESS,
+                        name=w.name,
+                        tx_hash="0xabc",
+                        block=1,
+                        network=network,
+                    )
+                )
+            return bulk_register.RunResult(registered=len(work))
+
+        register_all.side_effect = record
+        bulk_register.main(
+            [str(path), "--yes", "--name-template", "sqd-{n:03d}",
+             "--log", str(tmp_path / "l.jsonl")]
+        )
+
+    csv_path = tmp_path / "peers.txt.mainnet.registered.csv"
+    lines = csv_path.read_text().splitlines()
+    assert lines[0] == "peer_id,name,tx_hash,block,registered_at"
+    assert len(lines) == 3
+    assert "sqd-001" in lines[1] and "sqd-002" in lines[2]
+
+
+def test_a_dry_run_writes_no_csv(wired, tmp_path):
+    """A CSV asserts these nodes are registered; a dry run registers nothing."""
+    path = make_peer_file(tmp_path, 2)
+
+    bulk_register.main([str(path), "--dry-run", "--log", str(tmp_path / "l.jsonl")])
+
+    assert not (tmp_path / "peers.txt.mainnet.registered.csv").exists()

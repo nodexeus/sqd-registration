@@ -62,13 +62,57 @@ def encode_metadata(name: str | None) -> str:
     return metadata
 
 
-def prepare(entries: list[PeerEntry], template: str | None) -> list[NamedPeer]:
-    """Resolve and encode names for every entry, failing fast on any problem."""
+def template_is_constant(template: str) -> bool:
+    """Whether the template ignores `{n}`, so numbering cannot advance it."""
+    return template.format(n=1, peer_id="probe") == template.format(
+        n=2, peer_id="probe"
+    )
+
+
+def prepare(
+    entries: list[PeerEntry],
+    template: str | None,
+    used_names: frozenset[str] | set[str] = frozenset(),
+) -> list[NamedPeer]:
+    """Resolve and encode names for the entries about to be registered.
+
+    A template's `{n}` is the lowest number whose rendered name is not already
+    in `used_names` — names taken by earlier runs, plus explicit names anywhere
+    in the input file. That is what lets each template start its own sequence:
+    a second group registered under a different prefix begins at 1 rather than
+    continuing the file's line numbering, while resuming an interrupted group
+    picks up where it stopped instead of colliding from 1 again.
+
+    Because numbers are handed out as entries are consumed, callers must pass
+    only the entries they intend to register. Naming the whole file would burn
+    numbers on peers that are skipped.
+    """
     if template:
         validate_template(template)
+
+    taken = set(used_names)
     prepared = []
+    # A template with no {n} renders the same string forever; searching for an
+    # unused value would never terminate.
+    constant = bool(template) and template_is_constant(template)
+    next_n = 1
+
     for entry in entries:
-        name = resolve_name(entry, template)
+        if entry.name:
+            name = entry.name
+        elif not template:
+            name = None
+        elif constant:
+            name = template.format(n=next_n, peer_id=entry.peer_id)
+        else:
+            while True:
+                name = template.format(n=next_n, peer_id=entry.peer_id)
+                next_n += 1
+                if name not in taken:
+                    break
+
+        if name:
+            taken.add(name)
         prepared.append(
             NamedPeer(entry=entry, name=name, metadata=encode_metadata(name))
         )

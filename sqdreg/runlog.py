@@ -93,3 +93,26 @@ class RunLog:
             for r in self.records()
             if r.status == SUCCESS and r.network in (None, network)
         }
+
+    def used_names(self, network: str) -> set[str]:
+        """Names already claimed on this network, so numbering can skip them.
+
+        `pending` counts as claimed: that transaction may well have landed, and
+        reusing its number would put two workers under one name. A `failed`
+        registration never landed, so its number is genuinely free.
+        """
+        return {
+            r.name
+            for r in self.records()
+            if r.name
+            and r.status in (SUCCESS, PENDING)
+            and r.network in (None, network)
+        }
+
+    def registered(self, network: str) -> list[Record]:
+        """Confirmed registrations on this network, in the order they landed."""
+        return [
+            r
+            for r in self.records()
+            if r.status == SUCCESS and r.network in (None, network)
+        ]
