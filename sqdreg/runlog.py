@@ -36,6 +36,9 @@ class Record:
     error: str | None = None
     timestamp: str | None = None
     network: str | None = None
+    # Which action produced this record. Defaults to "register" so logs written
+    # before the other actions existed still read correctly.
+    action: str = "register"
 
 
 class RunLog:
@@ -75,7 +78,7 @@ class RunLog:
                 ) from exc
         return records
 
-    def succeeded_peer_ids(self, network: str) -> set[str]:
+    def succeeded_peer_ids(self, network: str, action: str = "register") -> set[str]:
         """Peer IDs a previous run confirmed on-chain *for this network*.
 
         A registration on tethys says nothing about mainnet, and the log is
@@ -91,7 +94,9 @@ class RunLog:
         return {
             r.peer_id
             for r in self.records()
-            if r.status == SUCCESS and r.network in (None, network)
+            if r.status == SUCCESS
+            and r.network in (None, network)
+            and (r.action or "register") == action
         }
 
     def used_names(self, network: str) -> set[str]:
@@ -107,12 +112,15 @@ class RunLog:
             if r.name
             and r.status in (SUCCESS, PENDING)
             and r.network in (None, network)
+            and (r.action or "register") == "register"
         }
 
-    def registered(self, network: str) -> list[Record]:
-        """Confirmed registrations on this network, in the order they landed."""
+    def completed(self, network: str, action: str = "register") -> list[Record]:
+        """Confirmed results for one action on this network, in order."""
         return [
             r
             for r in self.records()
-            if r.status == SUCCESS and r.network in (None, network)
+            if r.status == SUCCESS
+            and r.network in (None, network)
+            and (r.action or "register") == action
         ]

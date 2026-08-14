@@ -61,6 +61,8 @@ instead and tells you to set an environment variable.
 | `--dry-run` | Run every check, print the plan, send nothing |
 | `--yes` | Skip the confirmation prompt |
 | `--rpc-url` | Override the network's default RPC |
+| `--action` | `register` (default), `deregister`, `withdraw`, or `status` |
+| `--address` | Wallet to report on for `--action status`, so no credential is needed |
 | `--log` | Result log path (default `<input>.<network>.run.jsonl`) |
 
 Every real run also writes `<input>.<network>.registered.csv` — one row per
@@ -266,3 +268,54 @@ across 1000 nodes shorter names save ~0.0002 ETH, dropping names entirely saves
 node, and each costs something real (worse names, or a permanent change to which
 address owns the workers). Batching is worth considering for hardware-wallet
 signing convenience, turning 1000 confirmations into ~15, but not for gas.
+
+## The other three actions
+
+`deregister` and `withdraw` take the same `bytes peerId` argument as `register`,
+so **the same peer ID file drives all four actions**. Neither bonds anything:
+deregister costs only gas, and withdraw *returns* 100,000 SQD per worker.
+
+    .venv/bin/python bulk_register.py peer_ids.txt --action status --address 0x...
+    .venv/bin/python bulk_register.py peer_ids.txt --action deregister --dry-run
+    .venv/bin/python bulk_register.py peer_ids.txt --action withdraw --limit 10
+
+Each action reads every peer ID's on-chain state and acts only on the ones whose
+state permits it, so a mixed file is safe — nothing reverts because it wasn't
+eligible.
+
+| State | Meaning | Next action |
+| --- | --- | --- |
+| `unregistered` | Never registered, or a slot this account vacated | `register` |
+| `active` | Live and earning | `deregister` |
+| `deregistering` | Deregistered, running until the epoch ends | wait |
+| `locked` | Inactive, bond still locked | wait |
+| `withdrawable` | Lock expired, bond claimable | `withdraw` |
+| `foreign` | Registered by a different account | nothing — see below |
+
+Only the account that registered a worker can deregister or withdraw it. A peer
+ID someone else registered shows as `foreign` and is skipped rather than
+attempted.
+
+### `--action status`
+
+Read-only, and the only action that needs no credential — pass `--address` and
+it reports on any wallet. It prints a state breakdown, totals the SQD that is
+withdrawable right now, says when the next lock expires, and writes
+`<input>.<network>.status.csv` with a row per peer ID.
+
+This is the mode to run during the wait. `deregister` takes effect at the next
+epoch and the bond then stays locked for `lockPeriod`, both **99,999 L1 blocks
+(~13.9 days)** on mainnet, so deregister → withdraw spans roughly 14–28 days.
+
+> **On timing:** the lock is measured in the block number the *contract* sees,
+> which on Arbitrum is the **L1** block number, not the L2 one `eth_blockNumber`
+> returns (~25,700,000 against ~494,000,000). Comparing the wrong one marks every
+> locked worker withdrawable, and each `withdraw()` then reverts "Worker is
+> locked". The script reads `l1BlockNumber` for this.
+
+### The log distinguishes actions
+
+Each record stores which action produced it, so a successful deregistration
+never makes a later `register` run skip that peer ID. Records written before the
+field existed read as registrations. Each action writes its own CSV:
+`registered.csv`, `deregistered.csv`, `withdrawn.csv`.

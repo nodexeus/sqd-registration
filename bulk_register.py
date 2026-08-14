@@ -22,7 +22,14 @@ from web3.exceptions import ProviderConnectionError, TimeExhausted
 from sqdreg.naming import NamingError, prepare
 from sqdreg.networks import NETWORKS
 from sqdreg.peerids import PeerIdError, parse_file
-from sqdreg.registry import Registry
+from sqdreg.registry import (
+    ACTIVE,
+    FOREIGN,
+    LOCKED,
+    UNREGISTERED,
+    WITHDRAWABLE,
+    Registry,
+)
 from sqdreg.runlog import (
     FAILED,
     PENDING,
@@ -34,6 +41,23 @@ from sqdreg.runlog import (
 )
 
 PROG = "bulk_register.py"
+
+REGISTER = "register"
+DEREGISTER = "deregister"
+WITHDRAW = "withdraw"
+STATUS = "status"
+ACTIONS = (REGISTER, DEREGISTER, WITHDRAW, STATUS)
+
+# The worker state each action requires. register() also accepts a slot this
+# account previously vacated, which reads as UNREGISTERED.
+ACTIONABLE_STATE = {
+    REGISTER: UNREGISTERED,
+    DEREGISTER: ACTIVE,
+    WITHDRAW: WITHDRAWABLE,
+}
+
+# What the CSV of confirmed results is called, per action.
+CSV_NOUN = {REGISTER: "registered", DEREGISTER: "deregistered", WITHDRAW: "withdrawn"}
 MAX_CONSECUTIVE_FAILURES = 3
 RECEIPT_TIMEOUT = 300
 GAS_BUFFER_PERCENT = 25
@@ -116,6 +140,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "name for lines without an explicit name; supports {n} (the next "
             "number this template has not used) and {peer_id}, "
             "e.g. 'nodexeus-{n:03d}'"
+        ),
+    )
+    parser.add_argument(
+        "--action",
+        choices=ACTIONS,
+        default=REGISTER,
+        help=(
+            "register (default), deregister, withdraw, or status — a read-only "
+            "report of where every peer ID sits in the worker lifecycle"
+        ),
+    )
+    parser.add_argument(
+        "--address",
+        help=(
+            "wallet to report on for --action status, so no credential is "
+            "needed; ignored by the other actions"
         ),
     )
     parser.add_argument(
@@ -256,6 +296,60 @@ def connect(network, rpc_url: str | None) -> Web3:
     return w3
 
 
+def l1_block_number(w3) -> int:
+    """The block number the *contract* sees.
+
+    On Arbitrum, Solidity's `block.number` is the L1 block number, while
+    `eth_blockNumber` returns the L2 one — currently ~494,000,000 against
+    ~25,700,000. Comparing the L2 number with `deregisteredAt + lockPeriod`
+    would call every locked worker withdrawable and produce a run of "Worker is
+    locked" reverts, so the lock arithmetic must use this.
+    """
+    value = w3.eth.get_block("latest").get("l1BlockNumber")
+    if value is None:
+        # Not an Arbitrum-style chain; its block.number is the one we see.
+        return w3.eth.block_number
+    return int(value, 16) if isinstance(value, str) else int(value)
+
+
+def classify(entries, registry, l1_block, lock_period, owned):
+    """Read every peer ID's on-chain state, in file order."""
+    return [
+        read_rpc(
+            registry.worker_state,
+            entry.peer_bytes,
+            l1_block,
+            lock_period,
+            owned,
+            what=f"state lookup for {entry.peer_id}",
+        )
+        for entry in entries
+    ]
+
+
+def select_by_state(entries, states, runlog, limit, network, action):
+    """Pick the entries whose on-chain state permits `action`.
+
+    Unlike the register path this cannot stop early: a status report wants the
+    whole picture, and deregister/withdraw need each peer's state to explain
+    why it was skipped. The reads are cheap and nothing is sent.
+    """
+    already_done = runlog.succeeded_peer_ids(network, action)
+    wanted = ACTIONABLE_STATE[action]
+
+    work, skipped_logged, not_ready = [], [], []
+    for entry, state in zip(entries, states):
+        if entry.peer_id in already_done:
+            skipped_logged.append(entry.peer_id)
+            continue
+        if state.state != wanted:
+            not_ready.append((entry, state))
+            continue
+        if limit is None or len(work) < limit:
+            work.append(entry)
+    return work, skipped_logged, not_ready
+
+
 def select_work(entries, runlog, registry, limit, network):
     """Choose which peer entries to register.
 
@@ -335,14 +429,14 @@ def default_csv_path(peer_id_file: str, network: str) -> str:
     return f"{peer_id_file}.{network}.registered.csv"
 
 
-def write_registered_csv(path: str, runlog, network: str) -> int:
+def write_registered_csv(path: str, runlog, network: str, action: str = "register") -> int:
     """Rewrite the CSV of confirmed registrations from the log.
 
     Derived, never appended to in parallel: the JSONL log is the single
     write-ahead record, and regenerating from it each run means the two cannot
     drift apart. Returns the row count.
     """
-    rows = runlog.registered(network)
+    rows = runlog.completed(network, action)
     with open(path, "w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(CSV_COLUMNS)
@@ -538,7 +632,9 @@ def send_and_wait(w3, account, tx, label: str = "transaction") -> tuple[str, dic
         raise SendFailed(exc, tx_hash) from exc
 
 
-def register_all(w3, account, registry, work, runlog, fees, gas, network) -> RunResult:
+def register_all(
+    w3, account, registry, work, runlog, fees, gas, network, action=REGISTER
+) -> RunResult:
     """Register each peer in turn, logging every attempt as it resolves."""
     result = RunResult()
     nonce = read_rpc(
@@ -563,6 +659,7 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
                 error=error,
                 timestamp=utc_now(),
                 network=network,
+                action=action,
             )
         )
         result.pending += 1
@@ -577,13 +674,22 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
 
         peer_id = item.entry.peer_id
         label = f"{peer_id} as {item.name}" if item.name else peer_id
-        tx = registry.build_register(
-            peer_bytes=item.entry.peer_bytes,
-            metadata=item.metadata,
-            nonce=nonce,
-            fees=fees,
-            gas=gas,
-        )
+        if action == REGISTER:
+            tx = registry.build_register(
+                peer_bytes=item.entry.peer_bytes,
+                metadata=item.metadata,
+                nonce=nonce,
+                fees=fees,
+                gas=gas,
+            )
+        elif action == DEREGISTER:
+            tx = registry.build_deregister(
+                peer_bytes=item.entry.peer_bytes, nonce=nonce, fees=fees, gas=gas
+            )
+        else:
+            tx = registry.build_withdraw(
+                peer_bytes=item.entry.peer_bytes, nonce=nonce, fees=fees, gas=gas
+            )
         print(f"[{position}/{total}] {label}", flush=True)
 
         # Sign before sending so the hash is known even if the send fails: it is
@@ -634,6 +740,7 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
                     error=str(exc),
                     timestamp=utc_now(),
                     network=network,
+                    action=action,
                 )
             )
             result.failed += 1
@@ -692,6 +799,7 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
                     block=receipt["blockNumber"],
                     timestamp=utc_now(),
                     network=network,
+                    action=action,
                 )
             )
             result.registered += 1
@@ -708,6 +816,7 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
                     error="transaction reverted",
                     timestamp=utc_now(),
                     network=network,
+                    action=action,
                 )
             )
             result.failed += 1
@@ -722,14 +831,201 @@ def register_all(w3, account, registry, work, runlog, fees, gas, network) -> Run
     return result
 
 
+STATE_LABEL = {
+    UNREGISTERED: "not registered",
+    ACTIVE: "active",
+    "deregistering": "deregistering (waiting for the epoch)",
+    LOCKED: "locked",
+    WITHDRAWABLE: "withdrawable",
+    FOREIGN: "owned by another account",
+}
+
+
+def status_rows(entries, states, lock_period, l1_block):
+    """One printable row per peer ID, plus the CSV record behind it."""
+    rows = []
+    for entry, st in zip(entries, states):
+        detail = ""
+        if st.state == LOCKED and st.unlock_block:
+            days = (st.unlock_block - l1_block) * 12 / 86400
+            detail = f"unlocks in ~{days:.1f} days (L1 block {st.unlock_block:,})"
+        elif st.state == WITHDRAWABLE:
+            detail = f"{format_units(st.bond, 18)} SQD ready to withdraw"
+        elif st.state == FOREIGN:
+            detail = f"creator {st.creator}"
+        rows.append((entry.peer_id, st, detail))
+    return rows
+
+
+def write_status_csv(path: str, rows) -> int:
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            ("peer_id", "state", "worker_id", "bond", "unlock_block", "detail")
+        )
+        for peer_id, st, detail in rows:
+            writer.writerow(
+                [
+                    peer_id,
+                    st.state,
+                    st.worker_id or "",
+                    format_units(st.bond, 18) if st.bond else "",
+                    st.unlock_block or "",
+                    detail,
+                ]
+            )
+    return len(rows)
+
+
+def run_state_action(
+    args, network, w3, registry, runlog, account, owner, entries, log_path
+):
+    """Handle status, deregister and withdraw.
+
+    All three turn on the same on-chain classification, so they share the read
+    pass. None of them bonds anything, so there is no SQD balance, allowance or
+    approval step — only gas.
+    """
+    action = args.action
+    lock_period = read_rpc(registry.lock_period, what="lockPeriod read")
+    owned = read_rpc(registry.owned_worker_ids, what="owned workers read")
+    l1 = read_rpc(l1_block_number, w3, what="L1 block number read")
+    states = classify(entries, registry, l1, lock_period, owned)
+
+    print(f"network:     {network.name} (chain {network.chain_id})")
+    print(f"wallet:      {owner}")
+    print(f"in file:     {len(entries)}")
+
+    if action == STATUS:
+        counts = {}
+        for st in states:
+            counts[st.state] = counts.get(st.state, 0) + 1
+        print()
+        for state, count in sorted(counts.items(), key=lambda kv: -kv[1]):
+            print(f"  {count:>6}  {STATE_LABEL.get(state, state)}")
+
+        rows = status_rows(entries, states, lock_period, l1)
+        ready = [r for r in rows if r[1].state == WITHDRAWABLE]
+        if ready:
+            total = sum(r[1].bond for r in ready)
+            print(f"\n  {format_units(total, 18)} SQD is withdrawable now")
+        soonest = [r for r in rows if r[1].state == LOCKED and r[1].unlock_block]
+        if soonest:
+            nearest = min(r[1].unlock_block for r in soonest)
+            days = (nearest - l1) * 12 / 86400
+            print(f"  next unlock in ~{days:.1f} days")
+
+        csv_path = f"{args.peer_id_file}.{network.name}.status.csv"
+        try:
+            write_status_csv(csv_path, rows)
+            print(f"\nfull report written to {csv_path}")
+        except OSError as exc:
+            print(f"warning: could not write {csv_path}: {exc}", file=sys.stderr)
+        return 0
+
+    try:
+        work_entries, skipped_logged, not_ready = select_by_state(
+            entries, states, runlog, args.limit, network.name, action
+        )
+    except RunLogError as exc:
+        fail(str(exc))
+    except OSError as exc:
+        fail(f"cannot read the run log {log_path}: {exc}")
+
+    print(f"log:         {log_path}")
+    print(f"skipped:     {len(skipped_logged)} logged, {len(not_ready)} not ready")
+    print(f"to {action}: {len(work_entries)}")
+
+    if not work_entries:
+        print(f"nothing to {action}")
+        blocked = {}
+        for _entry, st in not_ready:
+            blocked[st.state] = blocked.get(st.state, 0) + 1
+        for state, count in sorted(blocked.items(), key=lambda kv: -kv[1]):
+            print(f"  {count:>6}  {STATE_LABEL.get(state, state)}")
+        return 0
+
+    # No names and no metadata: neither call carries any.
+    work = prepare(work_entries, None, frozenset())
+    estimate = (
+        registry.estimate_deregister_gas
+        if action == DEREGISTER
+        else registry.estimate_withdraw_gas
+    )
+    raw_gas, exact = read_rpc(
+        estimate, work[0].entry.peer_bytes, what=f"{action} gas estimate"
+    )
+    gas = raw_gas + raw_gas * GAS_BUFFER_PERCENT // 100
+    fees = read_rpc(current_fees, w3, what="fee read")
+    eth = check_eth(w3, owner, gas, fees, len(work), needs_approval=False)
+
+    print(
+        f"gas:         ~{format_units(eth.required, 18)} ETH max"
+        f"{'' if exact else ' (estimate unavailable, using fallback)'}"
+    )
+    print(f"ETH balance: {format_units(eth.balance, 18)} ETH")
+    if action == WITHDRAW:
+        returning = sum(
+            st.bond for entry, st in zip(entries, states)
+            if entry.peer_id in {w.entry.peer_id for w in work}
+        )
+        print(f"returning:   {format_units(returning, 18)} SQD to {owner}")
+
+    if not eth.sufficient:
+        fail(
+            f"insufficient ETH for gas: need up to "
+            f"{format_units(eth.required, 18)} ETH to cover {len(work)} "
+            f"transaction(s), hold {format_units(eth.balance, 18)} ETH"
+        )
+
+    if args.dry_run:
+        print("\n-- dry run, nothing sent --")
+        for item in work:
+            print(f"  would {action} {item.entry.peer_id}")
+        return 0
+
+    if not confirm(f"\n{action.capitalize()} {len(work)} worker(s) on "
+                   f"{network.name}?", args.yes):
+        print("aborted")
+        return 0
+
+    fees = read_rpc(current_fees, w3, what="fee read")
+    result = register_all(
+        w3, account, registry, work, runlog,
+        fees=fees, gas=gas, network=network.name, action=action,
+    )
+
+    csv_path = f"{args.peer_id_file}.{network.name}.{CSV_NOUN[action]}.csv"
+    try:
+        rows = write_registered_csv(csv_path, runlog, network.name, action)
+        print(f"\nresults written to {csv_path} ({rows} rows)")
+    except OSError as exc:
+        print(f"warning: could not write {csv_path}: {exc}", file=sys.stderr)
+
+    print(
+        f"\n{action}d {result.registered}, failed {result.failed}, "
+        f"pending {result.pending}, gas used {result.gas_used}"
+    )
+    if result.aborted:
+        print(f"run stopped: {result.aborted}", file=sys.stderr)
+    return 1 if result.failed or result.pending else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     network = NETWORKS[args.network]
     log_path = args.log or default_log_path(args.peer_id_file, network.name)
 
-    account = load_signer()
+    # Status is read-only, so an address is enough and no key is needed.
+    if args.action == STATUS and args.address:
+        account = None
+        owner = args.address
+    else:
+        account = load_signer()
+        owner = account.address
+
     w3 = connect(network, args.rpc_url)
-    registry = Registry(w3, network, account.address)
+    registry = Registry(w3, network, owner)
     runlog = RunLog(log_path)
 
     try:
@@ -744,6 +1040,10 @@ def main(argv: list[str] | None = None) -> int:
     if not entries:
         print(f"{args.peer_id_file} contains no peer IDs")
         return 0
+
+    if args.action != REGISTER:
+        return run_state_action(args, network, w3, registry, runlog, account,
+                                owner, entries, log_path)
 
     # Filter first, then name: numbers are handed out from the first unused
     # value, so naming peers that are about to be skipped would burn them.
@@ -766,7 +1066,7 @@ def main(argv: list[str] | None = None) -> int:
         fail(str(exc))
 
     print(f"network:     {network.name} (chain {network.chain_id})")
-    print(f"wallet:      {account.address}")
+    print(f"wallet:      {owner}")
     print(f"log:         {log_path}")
     print(f"in file:     {len(entries)}")
     print(f"skipped:     {len(skipped_logged)} logged, {len(skipped_onchain)} on-chain")

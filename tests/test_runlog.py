@@ -145,10 +145,47 @@ def test_used_names_ignores_unnamed_records(tmp_path):
     assert log.used_names("mainnet") == set()
 
 
-def test_registered_returns_only_successes_in_order(tmp_path):
+def test_completed_returns_only_successes_in_order(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
     log.append(Record(peer_id="a", status=SUCCESS, name="one", network="mainnet"))
     log.append(Record(peer_id="b", status=FAILED, name="two", network="mainnet"))
     log.append(Record(peer_id="c", status=SUCCESS, name="three", network="mainnet"))
 
-    assert [r.peer_id for r in log.registered("mainnet")] == ["a", "c"]
+    assert [r.peer_id for r in log.completed("mainnet")] == ["a", "c"]
+
+
+def test_actions_do_not_shadow_each_other(tmp_path):
+    """A deregister success must not make a later register run skip that peer.
+
+    Both are SUCCESS records for the same peer ID on the same network; without
+    the action field the skip filter would treat the deregistration as proof
+    the peer is already registered.
+    """
+    log = RunLog(tmp_path / "run.jsonl")
+    log.append(
+        Record(peer_id="a", status=SUCCESS, network="mainnet", action="deregister")
+    )
+
+    assert log.succeeded_peer_ids("mainnet", "register") == set()
+    assert log.succeeded_peer_ids("mainnet", "deregister") == {"a"}
+
+
+def test_a_legacy_record_without_an_action_counts_as_a_registration(tmp_path):
+    log = RunLog(tmp_path / "run.jsonl")
+    path = tmp_path / "run.jsonl"
+    path.write_text('{"peer_id": "a", "status": "success", "network": "mainnet"}\n')
+
+    assert log.succeeded_peer_ids("mainnet", "register") == {"a"}
+    assert log.succeeded_peer_ids("mainnet", "withdraw") == set()
+
+
+def test_used_names_ignores_non_register_records(tmp_path):
+    log = RunLog(tmp_path / "run.jsonl")
+    log.append(
+        Record(
+            peer_id="a", status=SUCCESS, name="sqd-001",
+            network="mainnet", action="withdraw",
+        )
+    )
+
+    assert log.used_names("mainnet") == set()
