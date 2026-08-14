@@ -5,3 +5,6 @@ __pycache__/
 *.run.jsonl
 .pytest_cache/
 .superpowers/
+*.swp
+*.swo
+*~
