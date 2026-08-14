@@ -17,9 +17,19 @@ with an explicit version like `python3.11` or `python3.10` instead.
 Provide exactly one credential in `.env` or the environment:
 
 - `PRIVATE_KEY` — hex, with or without `0x`
-- `MNEMONIC` — BIP-39 phrase, derived at `m/44'/60'/0'/0/0`
+- `MNEMONIC` — BIP-39 phrase, 12 or 24 words, derived at `m/44'/60'/0'/0/0`
 
-`.env` is gitignored. Nothing but the derived address is ever printed.
+If both are set, `PRIVATE_KEY` is used and the script warns on stderr. Quoting a
+phrase in `.env` is optional. See `.env.example` for the annotated template.
+
+A mnemonic resolves to the **first** account of that phrase — the one MetaMask
+shows first. If the wallet holding your SQD is a later account, export that
+account's private key and use `PRIVATE_KEY` instead; the script has no
+account-index option.
+
+`.env` is gitignored. Nothing but the derived address is ever printed: a
+malformed credential produces a generic error and is never echoed back, so a
+typo'd phrase cannot leak into a terminal log or CI output.
 
 ## Usage
 

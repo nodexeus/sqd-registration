@@ -2,6 +2,7 @@
 """Bulk-register SQD worker nodes from a file of peer IDs."""
 
 import argparse
+import json
 import os
 import shlex
 import sys
@@ -398,8 +399,14 @@ def is_transport_error(exc: BaseException) -> bool:
     replying, in which case the nonce is consumed and the peer may in fact be
     registered. `OSError` covers the stdlib socket errors and requests'
     exception tree alike, since RequestException subclasses IOError.
+
+    `JSONDecodeError` belongs here too, and is easy to miss because it is a
+    `ValueError` and so looks like a rejection. web3 calls `raise_for_status()`
+    before decoding, so a non-200 never reaches the decoder — but a proxy or
+    load balancer that returns HTTP 200 with an HTML error body does, and the
+    transaction's fate is just as unknown as a dropped connection's.
     """
-    return isinstance(exc, (OSError, ProviderConnectionError))
+    return isinstance(exc, (OSError, ProviderConnectionError, json.JSONDecodeError))
 
 
 def wait_for(w3, tx_hash) -> dict:

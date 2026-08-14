@@ -1,3 +1,4 @@
+import json
 from itertools import count
 from unittest.mock import MagicMock
 
@@ -225,10 +226,51 @@ def test_receipt_timeout_records_pending_and_aborts(tmp_path):
         (OSError("broken pipe"), True),
         (ProviderConnectionError("no route"), True),
         (ValueError("execution reverted"), False),
+        # A JSONDecodeError is a ValueError, so it reads like a rejection — but
+        # an undecodable reply says nothing about whether the node accepted the
+        # transaction.
+        (json.JSONDecodeError("Expecting value", "<html>502</html>", 0), True),
     ],
 )
 def test_transport_errors_are_the_ones_with_an_unknown_outcome(exc, unknown):
     assert bulk_register.is_transport_error(exc) is unknown
+
+
+def test_an_html_error_body_behind_http_200_is_treated_as_unknown():
+    """Proves the real web3 decode path, not a synthetic exception.
+
+    web3 calls raise_for_status() before decoding, so a non-200 never reaches
+    the decoder. A proxy that returns HTTP 200 with an HTML error body does,
+    and misclassifying that as a rejection would log FAILED for a transaction
+    the node may have accepted.
+    """
+    from web3._utils.encoding import FriendlyJsonSerde
+
+    with pytest.raises(json.JSONDecodeError) as raised:
+        FriendlyJsonSerde().json_decode("<html>502 Bad Gateway</html>")
+
+    assert isinstance(raised.value, ValueError)  # why it was misread before
+    assert bulk_register.is_transport_error(raised.value) is True
+
+
+def test_an_undecodable_reply_records_pending_with_the_hash_and_aborts(tmp_path):
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, account, registry = make_env([1, 1])
+    w3.eth.send_raw_transaction.side_effect = json.JSONDecodeError(
+        "Expecting value", "<html>502</html>", 0
+    )
+
+    result = bulk_register.register_all(
+        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
+    )
+
+    assert (result.pending, result.registered, result.failed) == (1, 0, 0)
+    assert result.aborted
+    records = log.records()
+    assert len(records) == 1
+    assert records[0].status == PENDING
+    # The hash is the only route to resolving it, so it must be recorded.
+    assert records[0].tx_hash
 
 
 def test_send_and_wait_reports_the_hash_when_the_send_fails():
