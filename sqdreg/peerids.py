@@ -59,8 +59,11 @@ def _split_line(text: str) -> tuple[str, str | None]:
     return peer_id.strip(), name.strip()
 
 
-def parse_file(path) -> tuple[list[PeerEntry], list[str]]:
-    """Read a peer ID file.
+def parse_lines(lines, origin: str = "line") -> tuple[list[PeerEntry], list[str]]:
+    """Parse peer ID lines from any source.
+
+    `origin` names the unit in error messages, so a file says "line 4" and a
+    repeated command-line flag says "--peer-id 4".
 
     Blank lines and `#` comments are ignored. Duplicates collapse to their
     first occurrence, keeping that line's name. Indices are 1-based positions
@@ -72,7 +75,7 @@ def parse_file(path) -> tuple[list[PeerEntry], list[str]]:
     first_seen: dict[str, int] = {}
     duplicates: list[str] = []
 
-    for lineno, line in enumerate(Path(path).read_text().splitlines(), start=1):
+    for lineno, line in enumerate(lines, start=1):
         text = line.strip()
         if not text or text.startswith("#"):
             continue
@@ -80,17 +83,18 @@ def parse_file(path) -> tuple[list[PeerEntry], list[str]]:
         peer_id, name = _split_line(text)
         if name is not None and not name:
             raise PeerIdError(
-                f"line {lineno}: trailing comma with no name "
+                f"{origin} {lineno}: trailing comma with no name "
                 f"(drop the comma to register {peer_id} unnamed)"
             )
         try:
             raw = decode_peer_id(peer_id)
         except PeerIdError as exc:
-            raise PeerIdError(f"line {lineno}: {exc}") from exc
+            raise PeerIdError(f"{origin} {lineno}: {exc}") from exc
 
         if peer_id in first_seen:
             duplicates.append(
-                f"line {lineno}: duplicate of line {first_seen[peer_id]}: {peer_id}"
+                f"{origin} {lineno}: duplicate of {origin} "
+                f"{first_seen[peer_id]}: {peer_id}"
             )
             continue
 
@@ -105,3 +109,22 @@ def parse_file(path) -> tuple[list[PeerEntry], list[str]]:
         )
 
     return entries, duplicates
+
+
+def parse_file(path) -> tuple[list[PeerEntry], list[str]]:
+    """Read a peer ID file.
+
+    Blank lines and `#` comments are ignored. Duplicates collapse to their
+    first occurrence, keeping that line's name. Any invalid line raises
+    `PeerIdError` naming its line number.
+    """
+    return parse_lines(Path(path).read_text().splitlines())
+
+
+def parse_peer_ids(peer_ids) -> tuple[list[PeerEntry], list[str]]:
+    """Build entries straight from repeated --peer-id values.
+
+    Same validation as a file, so a malformed ID is rejected before any chain
+    access; only the wording of the error changes.
+    """
+    return parse_lines(peer_ids, origin="--peer-id")

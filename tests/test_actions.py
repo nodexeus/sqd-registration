@@ -375,3 +375,56 @@ def test_the_resume_hint_carries_peer_id_and_action():
 
     assert "--action withdraw" in hint
     assert hint.count("--peer-id") == 2
+
+
+# --- acting without an input file -------------------------------------------
+
+
+def test_peer_id_alone_is_enough(tmp_path, monkeypatch, capsys):
+    """No file needed to act on IDs you have already named."""
+    import base58
+
+    pid = base58.b58encode(bytes([0x00, 36]) + bytes(range(36))).decode()
+    status_env(monkeypatch, [state(pid, ACTIVE)], tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    code = bulk_register.main(
+        [
+            "--action", "status",
+            "--peer-id", pid,
+            "--address", "0x000000000000000000000000000000000000dEaD",
+        ]
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "peer IDs:    1" in out  # not "in file"
+    assert (tmp_path / "adhoc.mainnet.status.csv").exists()
+
+
+def test_neither_a_file_nor_a_peer_id_is_an_error():
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.parse_args(["--action", "status"])
+
+    assert exc.value.code == 2
+
+
+def test_a_malformed_peer_id_flag_is_rejected_like_a_bad_file_line(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.main(["--action", "status", "--peer-id", "garbage-0OIl",
+                            "--address", "0x000000000000000000000000000000000000dEaD"])
+
+    assert exc.value.code == 2
+
+
+def test_adhoc_artifacts_do_not_collide_with_a_file_driven_run():
+    """An ad-hoc action must not append to the log a bulk run depends on."""
+    assert bulk_register.artifact_base(None) == "adhoc"
+    assert bulk_register.artifact_base("peers.txt") == "peers.txt"
+    assert bulk_register.default_log_path(
+        bulk_register.artifact_base(None), "mainnet"
+    ) == "adhoc.mainnet.run.jsonl"

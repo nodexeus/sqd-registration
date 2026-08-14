@@ -325,15 +325,20 @@ epoch and the bond then stays locked for `lockPeriod`, both **99,999 L1 blocks
 
 ### Acting on one node
 
-`--peer-id` narrows a run to specific peer IDs from the file, which is what you
-want to retry a single failure or rehearse one node:
+`--peer-id` acts on specific peer IDs, which is what you want to retry a single
+failure or rehearse one node. **The file is optional** — if you already know the
+ID, just name it:
 
-    .venv/bin/python bulk_register.py peers.txt --action deregister \
+    .venv/bin/python bulk_register.py --action deregister \
         --network tethys --peer-id 12D3KooW...
 
-Repeat the flag for several. Each must appear in the input file — a peer ID that
-does not is an error rather than an empty selection, because "nothing to do"
-reads exactly like "already done".
+Repeat the flag for several. Given *with* a file it narrows that file, and each
+ID must appear in it — one that does not is an error rather than an empty
+selection, because "nothing to do" reads exactly like "already done".
+
+Without a file, artifacts are named `adhoc.<network>.*` instead of after the
+input. That keeps a one-off action from appending to the run log a bulk run
+depends on. Pass `--log` explicitly if you want them to share one.
 
 `--address` is a *wallet* address and only applies to `--action status`. Passing
 it to a write action is an error: those act as whoever holds the credential, and

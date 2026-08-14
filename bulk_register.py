@@ -73,7 +73,7 @@ except ImportError as _exc:  # pragma: no cover - exercised by a subprocess test
 
 from sqdreg.naming import NamingError, prepare
 from sqdreg.networks import NETWORKS
-from sqdreg.peerids import PeerIdError, parse_file
+from sqdreg.peerids import PeerIdError, parse_file, parse_peer_ids
 from sqdreg.registry import (
     ACTIVE,
     FOREIGN,
@@ -153,6 +153,16 @@ def positive_int(value: str) -> int:
     return number
 
 
+# Artifact base name for runs driven by --peer-id alone. Distinct from any
+# file-driven run's artifacts, so an ad-hoc action cannot quietly append to the
+# log a 1000-node run depends on.
+ADHOC_BASE = "adhoc"
+
+
+def artifact_base(peer_id_file: str | None) -> str:
+    return peer_id_file or ADHOC_BASE
+
+
 def default_log_path(peer_id_file: str, network: str) -> str:
     """Default log path for this input file *on this network*.
 
@@ -172,7 +182,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Register SQD worker nodes in bulk from a file of peer IDs.",
     )
     parser.add_argument(
-        "peer_id_file", help="file with one 'peer_id' or 'peer_id,name' per line"
+        "peer_id_file",
+        nargs="?",
+        help=(
+            "file with one 'peer_id' or 'peer_id,name' per line. Optional if "
+            "--peer-id is given"
+        ),
     )
     parser.add_argument(
         "--network",
@@ -233,7 +248,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--log", help="result log path (default: <input>.<network>.run.jsonl)"
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not args.peer_id_file and not args.peer_ids:
+        parser.error("give a peer ID file, or --peer-id, or both")
+    return args
 
 
 def read_rpc(call, *args, what: str):
@@ -271,7 +289,10 @@ def resume_command(args: argparse.Namespace) -> str:
     `--yes` is deliberately *not* echoed even when it was supplied: a resume
     starts from a new plan with new counts, and that deserves a fresh look.
     """
-    parts = [PROG, shlex.quote(args.peer_id_file), "--network", args.network]
+    parts = [PROG]
+    if args.peer_id_file:
+        parts.append(shlex.quote(args.peer_id_file))
+    parts += ["--network", args.network]
     if args.action != REGISTER:
         parts += ["--action", args.action]
     if args.limit is not None:
@@ -974,6 +995,7 @@ def run_state_action(
     approval step — only gas.
     """
     action = args.action
+    base = artifact_base(args.peer_id_file)
     lock_period = read_rpc(registry.lock_period, what="lockPeriod read")
     owned = read_rpc(registry.owned_worker_ids, what="owned workers read")
     l1 = read_rpc(l1_block_number, w3, what="L1 block number read")
@@ -981,7 +1003,8 @@ def run_state_action(
 
     print(f"network:     {network.name} (chain {network.chain_id})")
     print(f"wallet:      {owner}")
-    print(f"in file:     {len(entries)}")
+    label = "in file" if args.peer_id_file else "peer IDs"
+    print(f"{label + ':':<12} {len(entries)}")
 
     if action == STATUS:
         counts = {}
@@ -1002,7 +1025,7 @@ def run_state_action(
             days = (nearest - l1) * 12 / 86400
             print(f"  next unlock in ~{days:.1f} days")
 
-        csv_path = f"{args.peer_id_file}.{network.name}.status.csv"
+        csv_path = f"{base}.{network.name}.status.csv"
         try:
             write_status_csv(csv_path, rows)
             print(f"\nfull report written to {csv_path}")
@@ -1082,7 +1105,7 @@ def run_state_action(
         fees=fees, gas=gas, network=network.name, action=action,
     )
 
-    csv_path = f"{args.peer_id_file}.{network.name}.{CSV_NOUN[action]}.csv"
+    csv_path = f"{base}.{network.name}.{CSV_NOUN[action]}.csv"
     try:
         rows = write_registered_csv(csv_path, runlog, network.name, action)
         print(f"\nresults written to {csv_path} ({rows} rows)")
@@ -1101,7 +1124,8 @@ def run_state_action(
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     network = NETWORKS[args.network]
-    log_path = args.log or default_log_path(args.peer_id_file, network.name)
+    base = artifact_base(args.peer_id_file)
+    log_path = args.log or default_log_path(base, network.name)
 
     if args.address:
         if args.action != STATUS:
@@ -1129,7 +1153,10 @@ def main(argv: list[str] | None = None) -> int:
     runlog = RunLog(log_path)
 
     try:
-        entries, duplicates = parse_file(args.peer_id_file)
+        if args.peer_id_file:
+            entries, duplicates = parse_file(args.peer_id_file)
+        else:
+            entries, duplicates = parse_peer_ids(args.peer_ids)
     except PeerIdError as exc:
         fail(str(exc))
     except OSError as exc:
@@ -1138,10 +1165,10 @@ def main(argv: list[str] | None = None) -> int:
     for warning in duplicates:
         print(f"warning: {warning}", file=sys.stderr)
     if not entries:
-        print(f"{args.peer_id_file} contains no peer IDs")
+        print(f"{base} contains no peer IDs")
         return 0
 
-    if args.peer_ids:
+    if args.peer_ids and args.peer_id_file:
         entries = restrict_to(entries, args.peer_ids)
         print(f"restricted to {len(entries)} of the file's peer ID(s)")
 
@@ -1172,7 +1199,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"network:     {network.name} (chain {network.chain_id})")
     print(f"wallet:      {owner}")
     print(f"log:         {log_path}")
-    print(f"in file:     {len(entries)}")
+    label = "in file" if args.peer_id_file else "peer IDs"
+    print(f"{label + ':':<12} {len(entries)}")
     print(f"skipped:     {len(skipped_logged)} logged, {len(skipped_onchain)} on-chain")
     print(f"to register: {len(work)}")
 
@@ -1277,7 +1305,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Regenerated from the log after every real run, so the operator always has
     # a current record even if the run aborted partway.
-    csv_path = default_csv_path(args.peer_id_file, network.name)
+    csv_path = default_csv_path(base, network.name)
     try:
         rows = write_registered_csv(csv_path, runlog, network.name)
         print(f"\nregistered nodes written to {csv_path} ({rows} rows)")
