@@ -8,3 +8,9 @@ __pycache__/
 *.swp
 *.swo
 *~
+
+# generated per-run artifacts
+*.status.csv
+*.registered.csv
+*.deregistered.csv
+*.withdrawn.csv
