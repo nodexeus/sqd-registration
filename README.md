@@ -135,6 +135,9 @@ twice against the same file registers ten, then the next ten.
 - Registration bonds 100,000 SQD per worker and needs an ERC-20 allowance. The
   script approves exactly `bond × count`, never an unlimited amount. (Bond
   amount verified against both mainnet and tethys.)
+- **The wallet's ETH is checked before anything is sent.** Running dry partway
+  through would abort the run, so the shortfall is reported up front instead.
+  See "Gas" below.
 - Already-registered peer IDs are skipped, so re-running a partly finished file
   wastes no gas.
 - Every attempt is appended to a JSONL log immediately, so an interrupted run
@@ -202,3 +205,28 @@ hardcoded.
     .venv/bin/pytest
 
 `web3` is mocked throughout. No test contacts an RPC endpoint or needs a key.
+
+## Gas
+
+One transaction per node, sent sequentially. A real mainnet `register()` used
+**370,138 gas** at 0.0200 gwei — about **0.0000074 ETH** per node, so roughly
+**0.0075 ETH for 1000 nodes** at typical Arbitrum prices.
+
+Before sending anything the script compares the wallet's ETH against a
+worst-case budget and aborts if it is short:
+
+    gas limit (measured estimate + 25%) x maxFeePerGas x transaction count
+
+That figure is deliberately pessimistic — around 0.023 ETH for 1000 nodes,
+roughly 3x the expected spend. It uses the padded gas *limit* rather than the
+gas actually consumed, and the full fee cap rather than the current base fee.
+Unused gas is never charged, so the real cost stays near the 0.0075 ETH figure;
+the budget only has to be coverable. Funding the wallet with **0.05 ETH** leaves
+comfortable room for a fee spike.
+
+Reducing gas is not worth pursuing. Metadata costs about 915 gas per byte, so
+across 1000 nodes shorter names save ~0.0002 ETH, dropping names entirely saves
+~0.0004 ETH, and batching via a Safe saves ~0.0004 ETH — each under a cent per
+node, and each costs something real (worse names, or a permanent change to which
+address owns the workers). Batching is worth considering for hardware-wallet
+signing convenience, turning 1000 confirmations into ~15, but not for gas.

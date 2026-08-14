@@ -30,6 +30,8 @@ def wired(monkeypatch):
     account = MagicMock()
     account.address = "0x0000000000000000000000000000000000000001"
     w3 = MagicMock()
+    # 1 ETH — comfortably covers gas for any work list these tests build.
+    w3.eth.get_balance.return_value = 10**18
     registry = MagicMock()
     registry.bond_amount.return_value = BOND
     registry.sqd_balance.return_value = BOND * 1000
@@ -444,3 +446,51 @@ def test_duplicate_warnings_are_printed(wired, tmp_path, capsys):
     bulk_register.main([str(path), "--dry-run", "--log", str(tmp_path / "l.jsonl")])
 
     assert "duplicate" in capsys.readouterr().err.lower()
+
+
+def test_insufficient_eth_aborts_before_any_transaction(wired, tmp_path, capsys):
+    _, w3, _ = wired
+    w3.eth.get_balance.return_value = 1  # 1 wei
+    path = make_peer_file(tmp_path, 3)
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.main([str(path), "--yes", "--log", str(tmp_path / "l.jsonl")])
+
+    assert exc.value.code == 2
+    w3.eth.send_raw_transaction.assert_not_called()
+    err = capsys.readouterr()
+    assert "insufficient ETH" in err.err
+    # The plan is printed first, so the shortfall is read in context.
+    assert "bond total:" in err.out
+    assert "ETH balance:" in err.out
+
+
+def test_a_dry_run_also_reports_insufficient_eth(wired, tmp_path):
+    """Catching it in a dry run is the point of a pre-check."""
+    _, w3, _ = wired
+    w3.eth.get_balance.return_value = 1
+    path = make_peer_file(tmp_path, 3)
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.main([str(path), "--dry-run", "--log", str(tmp_path / "l.jsonl")])
+
+    assert exc.value.code == 2
+    w3.eth.send_raw_transaction.assert_not_called()
+
+
+def test_the_eth_budget_covers_the_approval_when_one_is_needed(wired, tmp_path, capsys):
+    _, w3, registry = wired
+    registry.allowance.return_value = 0  # forces an approval
+    path = make_peer_file(tmp_path, 2)
+
+    bulk_register.main([str(path), "--dry-run", "--log", str(tmp_path / "l.jsonl")])
+
+    # 2 registrations + 1 approval must be budgeted, not just the 2.
+    gas = int(300000 * 1.25)
+    fees = {"maxFeePerGas": 200}
+    without_approval = gas * 2 * fees["maxFeePerGas"]
+    assert "ETH balance:" in capsys.readouterr().out
+    check = bulk_register.check_eth(
+        w3, "0xabc", gas=gas, fees=fees, count=2, needs_approval=True
+    )
+    assert check.required > without_approval

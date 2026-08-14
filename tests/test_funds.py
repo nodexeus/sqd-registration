@@ -260,3 +260,99 @@ def test_confirm_treats_eof_as_a_decline(monkeypatch, capsys):
 
     assert bulk_register.confirm("go?", assume_yes=False) is False
     assert "no input available" in capsys.readouterr().err
+
+
+# --- ETH balance pre-check -------------------------------------------------
+
+GWEI = 10**9
+FEES = {"maxFeePerGas": 2 * GWEI // 100, "maxPriorityFeePerGas": 0}  # 0.02 gwei
+
+
+def w3_with_eth(balance_wei):
+    w3 = MagicMock()
+    w3.eth.get_balance.return_value = balance_wei
+    return w3
+
+
+def test_required_eth_is_gas_limit_times_max_fee_times_count():
+    w3 = w3_with_eth(10**18)
+
+    check = bulk_register.check_eth(
+        w3, "0xabc", gas=400_000, fees=FEES, count=1000, needs_approval=False
+    )
+
+    assert check.required == 400_000 * FEES["maxFeePerGas"] * 1000
+    assert check.balance == 10**18
+    assert check.sufficient is True
+
+
+def test_an_approval_adds_one_more_transaction_to_the_budget():
+    w3 = w3_with_eth(10**18)
+
+    without = bulk_register.check_eth(
+        w3, "0xabc", gas=400_000, fees=FEES, count=10, needs_approval=False
+    )
+    with_approval = bulk_register.check_eth(
+        w3, "0xabc", gas=400_000, fees=FEES, count=10, needs_approval=True
+    )
+
+    delta = with_approval.required - without.required
+    assert delta == bulk_register.APPROVAL_GAS * FEES["maxFeePerGas"]
+
+
+def test_insufficient_eth_is_reported_not_raised():
+    """check_eth reports; main() prints the plan first, then fails.
+
+    Unlike check_funds it does not exit internally, so the operator sees the
+    bond and gas figures alongside the shortfall rather than an error alone.
+    """
+    w3 = w3_with_eth(1)
+
+    check = bulk_register.check_eth(
+        w3, "0xabc", gas=400_000, fees=FEES, count=1000, needs_approval=False
+    )
+
+    assert check.sufficient is False
+    assert check.required > check.balance
+
+
+def test_exactly_enough_eth_is_sufficient():
+    fees = {"maxFeePerGas": 100, "maxPriorityFeePerGas": 0}
+    exact = 400_000 * 100 * 5
+    w3 = w3_with_eth(exact)
+
+    check = bulk_register.check_eth(
+        w3, "0xabc", gas=400_000, fees=fees, count=5, needs_approval=False
+    )
+
+    assert check.sufficient is True
+
+
+def test_balance_is_read_for_the_signing_address():
+    w3 = w3_with_eth(10**18)
+
+    bulk_register.check_eth(
+        w3, "0xSIGNER", gas=1, fees=FEES, count=1, needs_approval=False
+    )
+
+    w3.eth.get_balance.assert_called_once_with("0xSIGNER")
+
+
+def test_a_thousand_registrations_needs_well_under_a_tenth_of_an_eth():
+    """Guards the order of magnitude, using real measured values.
+
+    A real mainnet register() used 370,138 gas; the script's limit is that
+    plus 25%. At a 0.04 gwei cap (2x the observed 0.02 base fee) 1000 nodes
+    must stay far below 0.1 ETH — if this ever fails, either the fee model or
+    the gas limit changed materially.
+    """
+    gas = int(370_138 * 1.25)
+    fees = {"maxFeePerGas": 4 * GWEI // 100, "maxPriorityFeePerGas": 0}
+    w3 = w3_with_eth(10**17)  # 0.1 ETH
+
+    check = bulk_register.check_eth(
+        w3, "0xabc", gas=gas, fees=fees, count=1000, needs_approval=True
+    )
+
+    assert check.sufficient is True
+    assert check.required < 10**17 // 2  # comfortably under 0.05 ETH

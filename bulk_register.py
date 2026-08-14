@@ -35,6 +35,10 @@ PROG = "bulk_register.py"
 MAX_CONSECUTIVE_FAILURES = 3
 RECEIPT_TIMEOUT = 300
 GAS_BUFFER_PERCENT = 25
+# A live estimate against the mainnet SQD token put approve() at 47,137 gas.
+# Rounded up for headroom; it is one transaction in a run of hundreds, so its
+# precision barely moves the budget.
+APPROVAL_GAS = 60_000
 
 # Arbitrum's suggested priority fee is routinely 0, which would leave
 # maxFeePerGas at exactly 2x the base fee with no tip at all. 0.01 gwei is a
@@ -285,6 +289,40 @@ def check_funds(registry, count: int) -> FundsCheck:
         balance=balance,
         allowance=allowance,
         needs_approval=allowance < required,
+    )
+
+
+@dataclass
+class EthCheck:
+    """The gas budget for a planned run, against the wallet's ETH."""
+
+    balance: int
+    required: int
+    sufficient: bool
+
+
+def check_eth(
+    w3, address: str, gas: int, fees: dict, count: int, needs_approval: bool
+) -> EthCheck:
+    """Worst-case ETH the run can be charged, against what the wallet holds.
+
+    Reports rather than exiting, unlike `check_funds`: the caller prints the
+    bond and gas figures first, so an operator sees the shortfall in context
+    instead of an error on its own.
+
+    The budget is deliberately the worst case — the full gas limit at the full
+    `maxFeePerGas`, for every transaction. Actual spend is lower, since unused
+    gas is not charged and the base fee is usually below the cap. Being
+    conservative is the point: running dry at node 700 of 1000 aborts the run,
+    and the remedy (send more ETH) is trivial by comparison.
+    """
+    transactions = gas * count
+    if needs_approval:
+        transactions += APPROVAL_GAS
+    required = transactions * fees["maxFeePerGas"]
+    balance = read_rpc(w3.eth.get_balance, address, what="ETH balance read")
+    return EthCheck(
+        balance=balance, required=required, sufficient=balance >= required
     )
 
 
@@ -675,20 +713,32 @@ def main(argv: list[str] | None = None) -> int:
     decimals = read_rpc(registry.token_decimals, what="token decimals read")
     gas, exact = gas_limit_for(registry, work)
     fees = read_rpc(current_fees, w3, what="fee read")
-    gas_cost_wei = gas * fees["maxFeePerGas"] * len(work)
+    eth = check_eth(
+        w3, account.address, gas, fees, len(work), funds.needs_approval
+    )
 
     print(f"bond:        {format_units(funds.bond, decimals)} SQD each")
     print(f"bond total:  {format_units(funds.required, decimals)} SQD")
     print(f"balance:     {format_units(funds.balance, decimals)} SQD")
     print(
-        f"gas:         ~{format_units(gas_cost_wei, 18)} ETH max"
+        f"gas:         ~{format_units(eth.required, 18)} ETH max"
         f"{'' if exact else ' (estimate unavailable, using fallback)'}"
     )
+    print(f"ETH balance: {format_units(eth.balance, 18)} ETH")
     if funds.needs_approval:
         print(
             f"approval:    needed — allowance is "
             f"{format_units(funds.allowance, decimals)} SQD, "
             f"will approve {format_units(funds.required, decimals)} SQD"
+        )
+
+    # After the plan, so the shortfall is read in context. Applies to dry runs
+    # too: finding this before sending is the whole point of the pre-check.
+    if not eth.sufficient:
+        fail(
+            f"insufficient ETH for gas: need up to "
+            f"{format_units(eth.required, 18)} ETH to cover {len(work)} "
+            f"transaction(s), hold {format_units(eth.balance, 18)} ETH"
         )
 
     if args.dry_run:
