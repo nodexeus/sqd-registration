@@ -1,6 +1,37 @@
 #!/usr/bin/env python3
 """Bulk-register SQD worker nodes from a file of peer IDs."""
 
+# Checked before anything else is imported. Every module below uses PEP 604
+# annotations (`str | None`) that are evaluated at runtime, so on Python 3.9
+# the import itself dies with `TypeError: unsupported operand type(s) for |`
+# pointing at a dataclass field — which says nothing about the real cause.
+#
+# The usual way to hit this is running ./bulk_register.py, whose shebang picks
+# the system python3 rather than the virtualenv.
+import os as _os
+import sys as _sys
+
+if _sys.version_info < (3, 10):
+    _venv = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ".venv")
+    _python = _os.path.join(_venv, "bin", "python")
+    _hint = (
+        _python if _os.path.exists(_python) else "python3.11 -m venv .venv  # then"
+    )
+    _sys.stderr.write(
+        "error: this needs Python 3.10 or newer, but it is running under "
+        "{}.{}.{}\n"
+        "       Running it as ./bulk_register.py uses the system python3.\n"
+        "       Use the virtualenv instead:\n"
+        "           {} bulk_register.py {}\n".format(
+            _sys.version_info[0],
+            _sys.version_info[1],
+            _sys.version_info[2],
+            _hint,
+            " ".join(_sys.argv[1:]) or "peer_ids.txt --action status",
+        )
+    )
+    raise SystemExit(2)
+
 import argparse
 import csv
 import json
@@ -13,11 +44,32 @@ from decimal import Decimal
 from getpass import getpass
 from typing import NoReturn
 
-from dotenv import load_dotenv
-from eth_account import Account
-from eth_account.signers.local import LocalAccount
-from web3 import Web3
-from web3.exceptions import ProviderConnectionError, TimeExhausted
+try:
+    from dotenv import load_dotenv
+    from eth_account import Account
+    from eth_account.signers.local import LocalAccount
+    from web3 import Web3
+    from web3.exceptions import ProviderConnectionError, TimeExhausted
+except ImportError as _exc:  # pragma: no cover - exercised by a subprocess test
+    # The other way ./bulk_register.py goes wrong: the right Python, but not
+    # the virtualenv, so none of the dependencies are importable.
+    _venv_python = _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)), ".venv", "bin", "python"
+    )
+    _sys.stderr.write(
+        "error: {}\n"
+        "       Dependencies are missing, so this is not running inside the\n"
+        "       project virtualenv.{}\n".format(
+            _exc,
+            "\n       Use: {} bulk_register.py {}".format(
+                _venv_python, " ".join(_sys.argv[1:]) or "peer_ids.txt --action status"
+            )
+            if _os.path.exists(_venv_python)
+            else "\n       Create it: python3.11 -m venv .venv && "
+            ".venv/bin/pip install -r requirements.txt",
+        )
+    )
+    raise SystemExit(2) from None
 
 from sqdreg.naming import NamingError, prepare
 from sqdreg.networks import NETWORKS

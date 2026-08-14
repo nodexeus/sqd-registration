@@ -19,10 +19,19 @@ is the recommended way to run it against a wallet holding real funds:
 The prompt takes either form; a phrase is recognised by its spaces. If you would
 rather use a file, `cp .env.example .env` and fill it in.
 
-**Python 3.10 or newer is required.** The code uses PEP 604 type annotations
-(e.g. `str | None`) which are evaluated at runtime, so Python 3.9 will fail at
-import with a `TypeError`. If your system `python3` is 3.9, invoke the venv
-with an explicit version like `python3.11` or `python3.10` instead.
+**Python 3.10 or newer is required**, and **always invoke it through the
+virtualenv**:
+
+    .venv/bin/python bulk_register.py ...
+
+Running `./bulk_register.py` does *not* work: the shebang picks the system
+`python3`, which on macOS is usually 3.9 and in any case is not the virtualenv,
+so the dependencies are missing. The script checks both and tells you the exact
+command to use instead, but it cannot fix the invocation for you.
+
+The version floor is real rather than stylistic: the code uses PEP 604
+annotations (`str | None`) that are evaluated at runtime, so 3.9 fails during
+import.
 
 When you do supply one ahead of time, provide exactly one, in `.env` or the
 environment:
