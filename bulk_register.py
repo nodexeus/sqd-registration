@@ -76,6 +76,7 @@ from sqdreg.networks import NETWORKS
 from sqdreg.peerids import PeerIdError, parse_file, parse_peer_ids
 from sqdreg.registry import (
     ACTIVE,
+    REGISTERING,
     FOREIGN,
     LOCKED,
     UNREGISTERED,
@@ -953,6 +954,7 @@ def register_all(
 STATE_LABEL = {
     UNREGISTERED: "not registered",
     ACTIVE: "active",
+    REGISTERING: "registering (waiting for the epoch to start)",
     "deregistering": "deregistering (waiting for the epoch)",
     LOCKED: "locked",
     WITHDRAWABLE: "withdrawable",
@@ -970,6 +972,13 @@ def status_rows(entries, states, lock_period, l1_block):
             detail = f"unlocks in ~{days:.1f} days (L1 block {st.unlock_block:,})"
         elif st.state == WITHDRAWABLE:
             detail = f"{format_units(st.bond, 18)} SQD ready to withdraw"
+        elif st.state == REGISTERING and st.registered_at:
+            hours = (st.registered_at - l1_block) * 12 / 3600
+            detail = (
+                f"goes live at L1 block {st.registered_at:,} (~{hours:.1f} h)"
+                if st.registered_at > l1_block
+                else f"goes live at L1 block {st.registered_at:,}"
+            )
         elif st.state == FOREIGN:
             detail = f"creator {st.creator}"
         rows.append((entry.peer_id, st, detail))

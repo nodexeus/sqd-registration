@@ -27,6 +27,9 @@ FALLBACK_WITHDRAW_GAS = 200_000
 
 # A worker's position in its lifecycle, derived from on-chain state.
 UNREGISTERED = "unregistered"
+# Registered, but register() sets registeredAt = nextEpoch(), so the worker is
+# not live until that boundary arrives and cannot be deregistered before then.
+REGISTERING = "registering"
 ACTIVE = "active"
 DEREGISTERING = "deregistering"
 LOCKED = "locked"
@@ -280,7 +283,9 @@ class Registry:
 
         is_active = self.contract.functions.isWorkerActive(worker_id).call()
         if deregistered_at == 0:
-            state, unlock = ACTIVE, None
+            # Not yet live: deregister() requires isWorkerActive and would
+            # revert, so this is a distinct state, not an active worker.
+            state, unlock = (ACTIVE if is_active else REGISTERING), None
         else:
             unlock = deregistered_at + lock_period
             if is_active:

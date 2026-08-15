@@ -428,3 +428,45 @@ def test_adhoc_artifacts_do_not_collide_with_a_file_driven_run():
     assert bulk_register.default_log_path(
         bulk_register.artifact_base(None), "mainnet"
     ) == "adhoc.mainnet.run.jsonl"
+
+
+# --- the epoch gap after registering ---------------------------------------
+
+
+def test_a_worker_awaiting_its_epoch_is_not_reported_active():
+    """register() sets registeredAt = nextEpoch(), so a worker is not live
+    immediately. Calling it active would let a deregister run select it, and
+    the contract requires isWorkerActive — it would revert 'Worker not active'.
+    """
+    from sqdreg.registry import REGISTERING, Registry
+
+    w3 = MagicMock()
+    w3.to_checksum_address.side_effect = lambda v: v
+    contract, token = MagicMock(), MagicMock()
+    w3.eth.contract.side_effect = [contract, token]
+    from sqdreg.networks import NETWORKS
+
+    registry = Registry(w3, NETWORKS["tethys"], "0xowner")
+    contract.functions.workerIds.return_value.call.return_value = 250
+    contract.functions.getWorker.return_value.call.return_value = [
+        "0xowner", b"p", 10**23, 11_495_400, 0, ""
+    ]
+    contract.functions.isWorkerActive.return_value.call.return_value = False
+
+    st = registry.worker_state(b"p", l1_block=11_495_381, lock_period=99_999, owned=set())
+
+    assert st.state == REGISTERING
+
+
+def test_a_registering_worker_is_not_selected_for_deregister(tmp_path):
+    from sqdreg.registry import REGISTERING
+
+    entries = [entry("a"), entry("b")]
+    states = [state("a", REGISTERING), state("b", ACTIVE)]
+
+    work, _logged, not_ready = bulk_register.select_by_state(
+        entries, states, RunLog(tmp_path / "l.jsonl"), None, "tethys", "deregister"
+    )
+
+    assert [w.peer_id for w in work] == ["b"]
+    assert not_ready[0][1].state == REGISTERING

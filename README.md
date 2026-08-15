@@ -324,6 +324,7 @@ eligible.
 | State | Meaning | Next action |
 | --- | --- | --- |
 | `unregistered` | Never registered, or a slot this account vacated | `register` |
+| `registering` | Registered, waiting for its epoch to begin | wait |
 | `active` | Live and earning | `deregister` |
 | `deregistering` | Deregistered, running until the epoch ends | wait |
 | `locked` | Inactive, bond still locked | wait |
@@ -340,6 +341,11 @@ Read-only, and the only action that needs no credential — pass `--address` and
 it reports on any wallet. It prints a state breakdown, totals the SQD that is
 withdrawable right now, says when the next lock expires, and writes
 `<input>.<network>.status.csv` with a row per peer ID.
+
+A freshly registered worker does not go live immediately: `register()` sets
+`registeredAt = nextEpoch()`, so it shows as `registering` until that boundary
+arrives — the SQD dashboard calls the same gap "REGISTERING". It cannot be
+deregistered until then, because the contract requires the worker to be active.
 
 This is the mode to run during the wait. `deregister` takes effect at the next
 epoch and the bond then stays locked for `lockPeriod`, both **99,999 L1 blocks
