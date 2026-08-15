@@ -1,9 +1,13 @@
 import json
+import random
 
 import pytest
 
 from sqdreg.naming import (
-    auto_name,
+    DEFAULT_BATCH_SIZE,
+    base_words,
+    peer_suffix,
+    pick_batch_words,
     MAX_METADATA_BYTES,
     NamingError,
     encode_metadata,
@@ -192,49 +196,133 @@ def test_a_template_without_n_does_not_hang():
     assert [p.name for p in prepared] == ["fixed-c", "fixed-d"]
 
 
-# --- generated names --------------------------------------------------------
+# --- batch-generated names -------------------------------------------------
 
 
-def test_a_generated_name_is_stable_for_the_same_peer_id():
-    """Seeded from the peer ID, so --dry-run previews the real name."""
-    assert auto_name("peer-a") == auto_name("peer-a")
+def test_a_batch_shares_one_word_and_the_next_batch_gets_another():
+    entries = [entry(peer_id=f"peer-{i:02d}") for i in range(5)]
+
+    prepared = prepare(entries, None, batch_size=2)
+
+    words = [p.name.split("-", 1)[0] for p in prepared]
+    assert words[0] == words[1] != words[2] == words[3] != words[4]
 
 
-def test_different_peers_get_different_names():
-    assert auto_name("peer-a") != auto_name("peer-b")
+def test_the_suffix_is_the_tail_of_the_peer_id():
+    prepared = prepare([entry(peer_id="12D3KooWabcXYZ123456")], None)
+
+    assert prepared[0].name.endswith("-123456")
+    assert peer_suffix("12D3KooWabcXYZ123456") == "123456"
 
 
-def test_a_later_attempt_yields_a_different_but_stable_name():
-    first, second = auto_name("peer-a", 0), auto_name("peer-a", 1)
+def test_names_are_unique_across_a_realistic_batch():
+    """Uniqueness comes from the peer ID tail, not from collision retries."""
+    entries = [entry(peer_id=f"12D3KooW{i:08d}") for i in range(1000)]
 
-    assert first != second
-    assert second == auto_name("peer-a", 1)
+    prepared = prepare(entries, None, batch_size=DEFAULT_BATCH_SIZE)
 
-
-def test_a_generated_name_that_is_taken_is_replaced_deterministically():
-    taken = {auto_name("a", 0)}
-
-    prepared = prepare([entry(peer_id="a")], None, used_names=taken)
-
-    assert prepared[0].name == auto_name("a", 1)
+    names = [p.name for p in prepared]
+    assert len(set(names)) == 1000
 
 
-def test_generated_names_are_unique_across_a_realistic_batch():
-    entries = [entry(peer_id=f"peer-{i}") for i in range(500)]
+def test_a_thousand_nodes_makes_twenty_groups_by_default():
+    entries = [entry(peer_id=f"12D3KooW{i:08d}") for i in range(1000)]
 
     prepared = prepare(entries, None)
 
-    names = [p.name for p in prepared]
-    assert len(set(names)) == len(names)
+    assert len({p.name.split("-", 1)[0] for p in prepared}) == 20
 
 
-def test_an_explicit_name_still_wins_over_a_generated_one():
+def test_batch_size_controls_the_number_of_groups():
+    entries = [entry(peer_id=f"12D3KooW{i:08d}") for i in range(100)]
+
+    prepared = prepare(entries, None, batch_size=10)
+
+    assert len({p.name.split("-", 1)[0] for p in prepared}) == 10
+
+
+def test_a_word_already_used_is_not_drawn_again():
+    """Redrawing a word would make two separate batches look like one."""
+    pool_word = pick_batch_words(1, rng=random.Random(1))[0]
+
+    chosen = pick_batch_words(
+        5, exclude={pool_word}, rng=random.Random(1)
+    )
+
+    assert pool_word not in chosen
+
+
+def test_words_already_in_the_log_are_excluded():
+    entries = [entry(peer_id="12D3KooWaaaaaa")]
+    first = prepare(entries, None)[0].name.split("-", 1)[0]
+
+    again = prepare(entries, None, used_names={f"{first}-zzzzzz"})[0]
+
+    assert again.name.split("-", 1)[0] != first
+
+
+def test_base_words_reads_the_word_off_existing_names():
+    assert base_words({"otter-E2uQHC", "kestrel-8CbBZ5", "nameless"}) == {
+        "otter",
+        "kestrel",
+    }
+
+
+def test_running_out_of_words_is_a_clear_error():
+    with pytest.raises(NamingError, match="raise --batch"):
+        pick_batch_words(10_000)
+
+
+def test_a_batch_size_below_one_is_rejected():
+    with pytest.raises(NamingError, match="at least 1"):
+        prepare([entry(peer_id="a")], None, batch_size=0)
+
+
+def test_an_explicit_name_still_wins():
     prepared = prepare([entry(peer_id="a", name="mine")], None)
 
     assert prepared[0].name == "mine"
 
 
-def test_a_template_still_wins_over_a_generated_one():
+def test_a_template_still_wins_and_suppresses_batching():
     prepared = prepare([entry(peer_id="a")], "sqd-{n:03d}")
 
     assert prepared[0].name == "sqd-001"
+
+
+def test_explicit_names_do_not_consume_batch_slots():
+    """Only entries that need a generated name count toward a batch."""
+    entries = [
+        entry(peer_id="p1"),
+        entry(peer_id="p2", name="explicit"),
+        entry(peer_id="p3"),
+    ]
+
+    prepared = prepare(entries, None, batch_size=2)
+
+    generated = [p.name.split("-", 1)[0] for p in prepared if p.name != "explicit"]
+    assert generated[0] == generated[1]  # both in the first batch of two
+
+
+def test_the_word_pool_is_not_one_category():
+    """Animals only would make every batch word an animal."""
+    from sqdreg.naming import _word_pool
+
+    pool = set(_word_pool())
+    assert len(pool) > 1000
+    # A sampling of coolname categories that are not animals.
+    assert {"lemon", "quartz", "furious"} & pool
+    assert not any("-" in w or " " in w for w in pool)
+
+
+def test_batch_words_are_drawn_across_categories():
+    words = set(pick_batch_words(60, rng=random.Random(7)))
+    from sqdreg.naming import _word_pool
+
+    animals = set()
+    from coolname.data import config
+
+    for key in ("animal", "animal_breed", "animal_legendary"):
+        animals |= set(config[key]["words"])
+    # Some animals are fine; all of them would mean a single-category pool.
+    assert not words <= animals

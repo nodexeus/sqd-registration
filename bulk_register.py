@@ -71,7 +71,7 @@ except ImportError as _exc:  # pragma: no cover - exercised by a subprocess test
     )
     raise SystemExit(2) from None
 
-from sqdreg.naming import NamingError, prepare
+from sqdreg.naming import DEFAULT_BATCH_SIZE, NamingError, prepare
 from sqdreg.networks import NETWORKS
 from sqdreg.peerids import PeerIdError, parse_file, parse_peer_ids
 from sqdreg.registry import (
@@ -216,6 +216,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "register (default), deregister, withdraw, or status — a read-only "
             "report of where every peer ID sits in the worker lifecycle"
+        ),
+    )
+    parser.add_argument(
+        "--batch",
+        type=positive_int,
+        default=DEFAULT_BATCH_SIZE,
+        metavar="N",
+        help=(
+            f"nodes per batch when names are generated (default: "
+            f"{DEFAULT_BATCH_SIZE}). Each batch gets one random word, so a "
+            "1000-node run makes 20 visibly distinct groups"
         ),
     )
     parser.add_argument(
@@ -1192,7 +1203,9 @@ def main(argv: list[str] | None = None) -> int:
         fail(f"cannot read the run log {log_path}: {exc}")
 
     try:
-        work = prepare(selected, args.name_template, taken)
+        work = prepare(
+            selected, args.name_template, taken, batch_size=args.batch
+        )
     except NamingError as exc:
         fail(str(exc))
 

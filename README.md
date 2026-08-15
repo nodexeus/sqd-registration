@@ -67,6 +67,7 @@ instead and tells you to set an environment variable.
 | `--network` | `mainnet` (default) or `tethys` |
 | `-n`, `--limit` | Register at most this many *new* nodes |
 | `--name-template` | Name for lines without an explicit name |
+| `--batch` | Nodes per generated-name batch (default 50) |
 | `--dry-run` | Run every check, print the plan, send nothing |
 | `--yes` | Skip the confirmation prompt |
 | `--rpc-url` | Override the network's default RPC |
@@ -165,20 +166,35 @@ put two workers under the same name.
 Names are allocated only to the peers a run actually registers, after the
 already-registered filter, so skipped peers never consume numbers.
 
-With neither, a friendly name is **generated** rather than leaving the node
-nameless — `lemon-bear`, `delicate-crayfish`, `smoky-quoll`. These come from
-[`coolname`](https://pypi.org/project/coolname/) (~370,000 two-word
-combinations), seeded from the peer ID rather than randomly, so:
+With neither, names are **generated in batches** rather than leaving nodes
+nameless. Each batch of `--batch` nodes (50 by default) draws one random word,
+and every node in it is named `<word>-<last 6 characters of its peer ID>`:
 
-- the same peer always gets the same name, which makes `--dry-run` a truthful
-  preview and means a retry after a failure does not rename the node;
-- a collision with an already-used name picks the next name in that peer's own
-  deterministic sequence, so 1000 nodes come out unique without a static
-  wordlist to maintain.
+    12D3KooW...NUQmGRNYnLKN  ->  influence-NYnLKN
+    12D3KooW...afpF6ZXxVuHR  ->  influence-XxVuHR
+    12D3KooW...Gzf5esnybPQT  ->  influence-nybPQT
+    12D3KooW...AH2AcdhKkNna  ->  goldfish-hKkNna     <- next batch
+    12D3KooW...ZDiUgZepJ3Kg  ->  goldfish-epJ3Kg
 
-Precedence is: explicit column, then `--name-template`, then generated. There is
-deliberately no way to register nameless; the contract's `updateMetadata` can
-rename a worker later without re-bonding if you want something different.
+A 1000-node run therefore produces 20 visibly distinct groups. The words come
+from [`coolname`](https://pypi.org/project/coolname/), drawn across all of its
+categories — adjectives, colours, minerals, abstract nouns, animals — so batches
+are not all of one kind. A word already used by an earlier run is never redrawn,
+which would make two separate batches look like one.
+
+The suffix is the peer ID's own tail, so names are **unique by construction**
+(base58, ~38 billion combinations for six characters) and a name in the
+dashboard maps straight back to its node without consulting the CSV.
+
+Words are drawn fresh each run. An interrupted batch simply ends where it
+stopped and the next run starts a new word; nothing has to be reconstructed
+from the log. This does mean `--dry-run` previews different words than the real
+run will use — the dry run verifies the mechanics and the counts, not the exact
+strings.
+
+Precedence is: explicit column, then `--name-template`, then batch-generated.
+There is deliberately no way to register nameless; `updateMetadata` can rename a
+worker later without re-bonding.
 
 ## How `--limit` works
 

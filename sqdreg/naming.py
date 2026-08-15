@@ -9,7 +9,7 @@ import json
 import random
 from dataclasses import dataclass
 
-from coolname import RandomGenerator
+from coolname import generate_slug
 from coolname.data import config as _coolname_config
 
 from sqdreg.peerids import PeerEntry
@@ -17,29 +17,66 @@ from sqdreg.peerids import PeerEntry
 MAX_METADATA_BYTES = 256
 
 
-# Two words give ~370,000 combinations. A 1000-node batch collides about five
-# times, which the caller's used-name check resolves; three words would make
-# that vanishingly rare but reads worse for no practical gain.
-AUTO_NAME_WORDS = 2
-# Defensive only. The sequence is deterministic and the space is large, so this
-# bound is never reached in practice.
-_MAX_AUTO_ATTEMPTS = 1000
+# Default nodes per batch. Each batch gets one random word, so a 1000-node run
+# draws 20 words and produces 20 visibly distinct groups.
+DEFAULT_BATCH_SIZE = 50
+# Characters of the peer ID used as the per-node suffix. Base58, and peer IDs
+# share the leading "12D3KooW", so the tail is the random part: 58**6 is about
+# 38 billion, making a duplicate name effectively impossible.
+PEER_SUFFIX_LEN = 6
 
 
-def auto_name(peer_id: str, attempt: int = 0) -> str:
-    """A friendly name derived deterministically from the peer ID.
+# Words unsuitable as a base name: they must survive being split back off at
+# the first hyphen, so anything non-alphabetic is out, and very short or very
+# long words read badly in a dashboard.
+_MIN_WORD, _MAX_WORD = 3, 12
 
-    Seeded from the peer ID rather than truly random, so a name is stable
-    across runs: `--dry-run` previews exactly what will be registered, and a
-    retry after a failure reuses the same name instead of inventing another.
 
-    `attempt` walks a different, equally deterministic name for the same peer
-    when the first is already taken.
+def _word_pool() -> list[str]:
+    """Every usable single word coolname ships, not just one category.
+
+    Drawing from all of its lists — adjectives, animals, colours, planets,
+    abstract nouns — keeps batch words varied instead of all of one kind.
     """
-    generator = RandomGenerator(
-        _coolname_config, random.Random(f"{peer_id}:{attempt}")
-    )
-    return generator.generate_slug(AUTO_NAME_WORDS)
+    pool = set()
+    for value in _coolname_config.values():
+        if not isinstance(value, dict) or value.get("type") != "words":
+            continue
+        for word in value.get("words", ()):
+            if _MIN_WORD <= len(word) <= _MAX_WORD and word.isalpha():
+                pool.add(word)
+    if len(pool) < 100:  # pragma: no cover - guards a library restructure
+        # Fall back to the noun half of generated slugs.
+        while len(pool) < 200:
+            word = generate_slug(2).split("-", 1)[1]
+            if word.isalpha():
+                pool.add(word)
+    return sorted(pool)
+
+
+def peer_suffix(peer_id: str, length: int = PEER_SUFFIX_LEN) -> str:
+    return peer_id[-length:]
+
+
+def pick_batch_words(count: int, exclude=frozenset(), rng=None) -> list[str]:
+    """Choose `count` distinct batch words, avoiding any already in use.
+
+    Excluding words the log has already seen keeps batches visually distinct:
+    redrawing a word would make two separate groups look like one.
+    """
+    rng = rng or random.Random()
+    pool = [w for w in _word_pool() if w not in exclude]
+    if len(pool) < count:
+        raise NamingError(
+            f"only {len(pool)} unused batch words available but {count} "
+            f"batches are needed; raise --batch to use fewer"
+        )
+    return rng.sample(pool, count)
+
+
+def base_words(names) -> set[str]:
+    """The batch word of each existing name, i.e. everything before the tail."""
+    return {name.split("-", 1)[0] for name in names if "-" in name}
 
 
 class NamingError(ValueError):
@@ -102,6 +139,8 @@ def prepare(
     entries: list[PeerEntry],
     template: str | None,
     used_names: frozenset[str] | set[str] = frozenset(),
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    rng=None,
 ) -> list[NamedPeer]:
     """Resolve and encode names for the entries about to be registered.
 
@@ -119,7 +158,24 @@ def prepare(
     if template:
         validate_template(template)
 
+    if batch_size < 1:
+        raise NamingError("batch size must be at least 1")
+
     taken = set(used_names)
+
+    # One word per batch of entries that need a generated name. Drawn fresh
+    # every run, so an interrupted batch simply ends and the next run starts a
+    # new word rather than trying to reconstruct the old one.
+    auto_count = 0 if template else sum(1 for e in entries if not e.name)
+    words = (
+        pick_batch_words(
+            -(-auto_count // batch_size), exclude=base_words(taken), rng=rng
+        )
+        if auto_count
+        else []
+    )
+    auto_index = 0
+
     prepared = []
     # A template with no {n} renders the same string forever; searching for an
     # unused value would never terminate.
@@ -130,17 +186,11 @@ def prepare(
         if entry.name:
             name = entry.name
         elif not template:
-            # No explicit name and no template: generate one rather than
-            # register the node nameless, which is unmanageable at scale.
-            for attempt in range(_MAX_AUTO_ATTEMPTS):
-                name = auto_name(entry.peer_id, attempt)
-                if name not in taken:
-                    break
-            else:
-                raise NamingError(
-                    f"could not find an unused generated name for "
-                    f"{entry.peer_id} after {_MAX_AUTO_ATTEMPTS} attempts"
-                )
+            # No explicit name and no template: name it from its batch rather
+            # than register nameless, which is unmanageable at scale.
+            word = words[auto_index // batch_size]
+            name = f"{word}-{peer_suffix(entry.peer_id)}"
+            auto_index += 1
         elif constant:
             name = template.format(n=next_n, peer_id=entry.peer_id)
         else:
