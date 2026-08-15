@@ -76,6 +76,7 @@ from sqdreg.networks import NETWORKS
 from sqdreg.peerids import PeerIdError, parse_file, parse_peer_ids
 from sqdreg.registry import (
     ACTIVE,
+    Treasury,
     REGISTERING,
     FOREIGN,
     LOCKED,
@@ -98,8 +99,12 @@ PROG = "bulk_register.py"
 REGISTER = "register"
 DEREGISTER = "deregister"
 WITHDRAW = "withdraw"
+CLAIM = "claim"
 STATUS = "status"
-ACTIONS = (REGISTER, DEREGISTER, WITHDRAW, STATUS)
+ACTIONS = (REGISTER, DEREGISTER, WITHDRAW, CLAIM, STATUS)
+# Actions that need no peer IDs at all. Rewards are claimed per wallet: the
+# distributor sweeps every worker the wallet owns in one transaction.
+WALLET_ACTIONS = (CLAIM,)
 
 # The worker state each action requires. register() also accepts a slot this
 # account previously vacated, which reads as UNREGISTERED.
@@ -110,7 +115,12 @@ ACTIONABLE_STATE = {
 }
 
 # What the CSV of confirmed results is called, per action.
-CSV_NOUN = {REGISTER: "registered", DEREGISTER: "deregistered", WITHDRAW: "withdrawn"}
+CSV_NOUN = {
+    REGISTER: "registered",
+    DEREGISTER: "deregistered",
+    WITHDRAW: "withdrawn",
+    CLAIM: "claimed",
+}
 MAX_CONSECUTIVE_FAILURES = 3
 RECEIPT_TIMEOUT = 300
 GAS_BUFFER_PERCENT = 25
@@ -215,8 +225,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=ACTIONS,
         default=REGISTER,
         help=(
-            "register (default), deregister, withdraw, or status — a read-only "
-            "report of where every peer ID sits in the worker lifecycle"
+            "register (default), deregister, withdraw, claim, or status. "
+            "claim sweeps every reward the wallet has earned in one "
+            "transaction and needs no peer IDs; status is a read-only report"
         ),
     )
     parser.add_argument(
@@ -261,7 +272,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--log", help="result log path (default: <input>.<network>.run.jsonl)"
     )
     args = parser.parse_args(argv)
-    if not args.peer_id_file and not args.peer_ids:
+    if (
+        not args.peer_id_file
+        and not args.peer_ids
+        and args.action not in WALLET_ACTIONS
+    ):
         parser.error("give a peer ID file, or --peer-id, or both")
     return args
 
@@ -1050,6 +1065,17 @@ def run_state_action(
             days = (nearest - l1) * 12 / 86400
             print(f"  next unlock in ~{days:.1f} days")
 
+        # Rewards are per wallet, not per peer ID, so they belong in the
+        # summary rather than a column.
+        treasury = Treasury(w3, network, owner)
+        claimable = read_rpc(treasury.claimable, what="claimable read")
+        if claimable:
+            decimals = read_rpc(registry.token_decimals, what="token decimals read")
+            print(
+                f"  {format_units(claimable, decimals)} SQD in rewards is "
+                f"claimable (--action claim)"
+            )
+
         csv_path = f"{base}.{network.name}.status.csv"
         try:
             write_status_csv(csv_path, rows)
@@ -1146,6 +1172,94 @@ def run_state_action(
     return 1 if result.failed or result.pending else 0
 
 
+def run_claim(args, network, w3, registry, runlog, account, owner):
+    """Sweep every reward this wallet has earned, in one transaction.
+
+    Needs no peer IDs: the distributor loops over getOwnedWorkers(msg.sender)
+    internally, zeroing each worker's balance and adding staking rewards, so
+    the whole fleet is claimed at once.
+    """
+    treasury = Treasury(w3, network, owner)
+    decimals = read_rpc(registry.token_decimals, what="token decimals read")
+    claimable = read_rpc(treasury.claimable, what="claimable read")
+    workers = read_rpc(registry.owned_worker_ids, what="owned workers read")
+
+    print(f"network:     {network.name} (chain {network.chain_id})")
+    print(f"wallet:      {owner}")
+    print(f"workers:     {len(workers)}")
+    print(f"claimable:   {format_units(claimable, decimals)} SQD")
+
+    if claimable == 0:
+        print("nothing to claim")
+        return 0
+
+    raw_gas, exact = read_rpc(
+        treasury.estimate_claim_gas, len(workers), what="claim gas estimate"
+    )
+    gas = raw_gas + raw_gas * GAS_BUFFER_PERCENT // 100
+    fees = read_rpc(current_fees, w3, what="fee read")
+    eth = check_eth(w3, owner, gas, fees, 1, needs_approval=False)
+
+    print(
+        f"gas:         ~{format_units(eth.required, 18)} ETH max"
+        f"{'' if exact else ' (estimate unavailable, projected from fleet size)'}"
+    )
+    print(f"ETH balance: {format_units(eth.balance, 18)} ETH")
+
+    if not eth.sufficient:
+        fail(
+            f"insufficient ETH for gas: need up to "
+            f"{format_units(eth.required, 18)} ETH, hold "
+            f"{format_units(eth.balance, 18)} ETH"
+        )
+
+    if args.dry_run:
+        print("\n-- dry run, nothing sent --")
+        print(f"  would claim {format_units(claimable, decimals)} SQD to {owner}")
+        return 0
+
+    if not confirm(
+        f"\nClaim {format_units(claimable, decimals)} SQD on {network.name}?",
+        args.yes,
+    ):
+        print("aborted")
+        return 0
+
+    fees = read_rpc(current_fees, w3, what="fee read")
+    nonce = read_rpc(
+        w3.eth.get_transaction_count, owner, what="nonce read"
+    )
+    amount = format_units(claimable, decimals)
+    try:
+        tx_hash, receipt = send_and_wait(
+            w3, account, treasury.build_claim(nonce, fees, gas), label="claim"
+        )
+    except SendFailed as exc:
+        runlog.append(
+            Record(
+                peer_id=owner, status=PENDING, tx_hash=exc.tx_hash,
+                error=str(exc), timestamp=utc_now(),
+                network=network.name, action=CLAIM, amount=amount,
+            )
+        )
+        fail(f"claim did not confirm: {exc}")
+
+    status = SUCCESS if receipt["status"] == 1 else FAILED
+    runlog.append(
+        Record(
+            peer_id=owner, status=status, tx_hash=tx_hash,
+            block=receipt["blockNumber"], timestamp=utc_now(),
+            network=network.name, action=CLAIM, amount=amount,
+            error=None if status == SUCCESS else "transaction reverted",
+        )
+    )
+    if status != SUCCESS:
+        fail(f"claim reverted ({tx_hash})")
+
+    print(f"\nclaimed {amount} SQD in block {receipt['blockNumber']} ({tx_hash})")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     network = NETWORKS[args.network]
@@ -1176,6 +1290,9 @@ def main(argv: list[str] | None = None) -> int:
     w3 = connect(network, args.rpc_url)
     registry = Registry(w3, network, owner)
     runlog = RunLog(log_path)
+
+    if args.action == CLAIM:
+        return run_claim(args, network, w3, registry, runlog, account, owner)
 
     try:
         if args.peer_id_file:

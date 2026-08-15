@@ -71,7 +71,7 @@ instead and tells you to set an environment variable.
 | `--dry-run` | Run every check, print the plan, send nothing |
 | `--yes` | Skip the confirmation prompt |
 | `--rpc-url` | Override the network's default RPC |
-| `--action` | `register` (default), `deregister`, `withdraw`, or `status` |
+| `--action` | `register` (default), `deregister`, `withdraw`, `claim`, or `status` |
 | `--peer-id` | Act on this peer ID only, instead of the whole file; repeat for several |
 | `--address` | Wallet to report on for `--action status`, so no credential is needed |
 | `--log` | Result log path (default `<input>.<network>.run.jsonl`) |
@@ -380,6 +380,29 @@ depends on. Pass `--log` explicitly if you want them to share one.
 it to a write action is an error: those act as whoever holds the credential, and
 silently ignoring it would run against the whole file instead of the node you
 meant.
+
+### `--action claim`
+
+Rewards are earned **per wallet, not per peer ID**, so there is no sweep to
+perform — one transaction claims everything:
+
+    .venv/bin/python bulk_register.py --action claim --network tethys
+
+No peer ID file and no `--peer-id`; this is the one action that needs neither.
+`RewardTreasury.claim()` takes no peer ID, and the distributor loops over
+`getOwnedWorkers(msg.sender)` internally, zeroing every worker's balance and
+adding staking rewards.
+
+Gas scales with the fleet because of that loop. Measured on mainnet: 82,011 gas
+for a wallet with no workers and 1,619,348 for one with 201, i.e. roughly 7,650
+per worker. A 1000-worker sweep is therefore about **7.7M gas, ~0.00015 ETH** —
+well inside Arbitrum's block limit.
+
+`--action status` also reports the claimable total, since reading it is free.
+
+If the SQD is held in a vesting contract, claiming goes through it in the same
+way registration does: `RewardTreasury` is whitelisted as a vested target, so
+the call becomes `vesting.execute(rewardTreasury, claim(distribution), 0)`.
 
 ### The log distinguishes actions
 

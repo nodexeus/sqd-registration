@@ -229,9 +229,13 @@ def status_env(monkeypatch, states, tmp_path):
     # Keyed by call order, not peer_bytes: the real call receives the decoded
     # multihash, while these fixtures carry placeholder bytes.
     registry.worker_state.side_effect = list(states)
+    registry.token_decimals.return_value = 18
+    treasury = MagicMock()
+    treasury.claimable.return_value = 0
     w3 = MagicMock()
     w3.eth.get_block.return_value = {"l1BlockNumber": 1000}
     monkeypatch.setattr(bulk_register, "connect", lambda n, r: w3)
+    monkeypatch.setattr(bulk_register, "Treasury", lambda *a, **k: treasury)
     monkeypatch.setattr(bulk_register, "Registry", lambda *a, **k: registry)
     monkeypatch.setattr(
         bulk_register, "load_signer", lambda: pytest.fail("asked for a credential")
@@ -495,3 +499,113 @@ def test_no_status_csv_field_needs_quoting(tmp_path):
     # Still parses to the right shape.
     parsed = list(csvmod.reader(out.open()))
     assert len(parsed) == 4 and all(len(r) == 6 for r in parsed)
+
+
+# --- claiming rewards -------------------------------------------------------
+
+
+def claim_env(monkeypatch, claimable, workers=3, receipt_status=1):
+    account = MagicMock()
+    account.address = "0x000000000000000000000000000000000000dEaD"
+    w3 = MagicMock()
+    w3.eth.get_balance.return_value = 10**18
+    w3.eth.get_transaction_count.return_value = 1
+    registry = MagicMock()
+    registry.token_decimals.return_value = 18
+    registry.owned_worker_ids.return_value = set(range(workers))
+    treasury = MagicMock()
+    treasury.claimable.return_value = claimable
+    treasury.estimate_claim_gas.return_value = (200_000, True)
+    monkeypatch.setattr(bulk_register, "load_signer", lambda: account)
+    monkeypatch.setattr(bulk_register, "connect", lambda n, r: w3)
+    monkeypatch.setattr(bulk_register, "Registry", lambda *a, **k: registry)
+    monkeypatch.setattr(bulk_register, "Treasury", lambda *a, **k: treasury)
+    monkeypatch.setattr(
+        bulk_register, "current_fees",
+        lambda _w: {"maxFeePerGas": 200, "maxPriorityFeePerGas": 10},
+    )
+    monkeypatch.setattr(
+        bulk_register, "send_and_wait",
+        lambda *a, **k: ("0xclaim", {"status": receipt_status, "blockNumber": 42}),
+    )
+    return w3, registry, treasury
+
+
+def test_claim_needs_no_peer_ids(monkeypatch, tmp_path, capsys):
+    """Rewards are per wallet; the distributor sweeps the fleet internally."""
+    claim_env(monkeypatch, claimable=5 * 10**18)
+    monkeypatch.chdir(tmp_path)
+
+    code = bulk_register.main(["--action", "claim", "--yes"])
+
+    assert code == 0
+    assert "claimed 5 SQD" in capsys.readouterr().out
+
+
+def test_nothing_to_claim_exits_cleanly(monkeypatch, tmp_path, capsys):
+    _w3, _reg, treasury = claim_env(monkeypatch, claimable=0)
+    monkeypatch.chdir(tmp_path)
+
+    code = bulk_register.main(["--action", "claim", "--yes"])
+
+    assert code == 0
+    assert "nothing to claim" in capsys.readouterr().out
+
+
+def test_a_claim_dry_run_sends_nothing(monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    claim_env(monkeypatch, claimable=5 * 10**18)
+    sent = []
+    monkeypatch.setattr(
+        bulk_register, "send_and_wait",
+        lambda *a, **k: sent.append(a) or ("0x", {"status": 1, "blockNumber": 1}),
+    )
+
+    bulk_register.main(["--action", "claim", "--dry-run"])
+
+    assert sent == []
+    assert "would claim 5 SQD" in capsys.readouterr().out
+
+
+def test_a_claim_is_logged_with_its_amount(monkeypatch, tmp_path):
+    claim_env(monkeypatch, claimable=7 * 10**18)
+    monkeypatch.chdir(tmp_path)
+    log = tmp_path / "c.jsonl"
+
+    bulk_register.main(["--action", "claim", "--yes", "--log", str(log)])
+
+    record = RunLog(log).records()[0]
+    assert record.action == "claim"
+    assert record.amount == "7"
+    assert record.tx_hash == "0xclaim"
+
+
+def test_a_reverted_claim_exits_nonzero(monkeypatch, tmp_path):
+    claim_env(monkeypatch, claimable=5 * 10**18, receipt_status=0)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.main(["--action", "claim", "--yes"])
+
+    assert exc.value.code == 2
+
+
+def test_the_claim_gas_fallback_scales_with_the_fleet():
+    """Estimation reverts when there is nothing to claim, which is exactly
+    when a dry run happens, so a flat constant would misprice a large fleet."""
+    from sqdreg.networks import NETWORKS
+    from sqdreg.registry import Treasury
+
+    w3 = MagicMock()
+    w3.to_checksum_address.side_effect = lambda v: v
+    treasury = Treasury(w3, NETWORKS["mainnet"], "0xowner")
+    treasury.contract.functions.claim.return_value.estimate_gas.side_effect = (
+        Exception("nothing to claim")
+    )
+
+    small, exact_small = treasury.estimate_claim_gas(10)
+    large, _ = treasury.estimate_claim_gas(1000)
+
+    assert exact_small is False
+    assert large > small
+    assert large > 7_000_000  # a 1000-worker sweep measured ~7.7M on mainnet

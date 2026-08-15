@@ -39,6 +39,9 @@ class Record:
     # Which action produced this record. Defaults to "register" so logs written
     # before the other actions existed still read correctly.
     action: str = "register"
+    # Human-readable token amount, for actions that move value: the bond a
+    # withdraw returned, or the rewards a claim swept.
+    amount: str | None = None
 
 
 class RunLog:

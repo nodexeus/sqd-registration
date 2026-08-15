@@ -23,6 +23,11 @@ FALLBACK_REGISTER_GAS = 600_000
 # Both are far cheaper than register(): neither moves a bond in, and neither
 # writes metadata.
 FALLBACK_DEREGISTER_GAS = 120_000
+# claim() loops over every worker the wallet owns, so its gas scales with the
+# fleet. Measured on mainnet: 82,011 gas for 0 workers and 1,619,348 for 201,
+# i.e. about 7,650 per worker. The fallback covers a 1000-worker sweep.
+FALLBACK_CLAIM_BASE_GAS = 100_000
+CLAIM_GAS_PER_WORKER = 8_000
 FALLBACK_WITHDRAW_GAS = 200_000
 
 # A worker's position in its lifecycle, derived from on-chain state.
@@ -405,3 +410,79 @@ class Registry:
         except Exception:
             return FALLBACK_REGISTER_GAS, False
         return gas, True
+
+
+REWARD_TREASURY_ABI = [
+    {
+        "inputs": [
+            {"name": "rewardDistribution", "type": "address"},
+            {"name": "sender", "type": "address"},
+        ],
+        "name": "claimable",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "rewardDistribution", "type": "address"}],
+        "name": "claim",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+
+
+class Treasury:
+    """Reward claiming, which is per wallet rather than per peer ID.
+
+    `claim()` takes no peer ID: the distributor loops over
+    `getOwnedWorkers(msg.sender)`, zeroes each worker's balance and adds
+    staking rewards, so one transaction sweeps the whole fleet.
+    """
+
+    def __init__(self, w3, network: Network, address: str):
+        self.w3 = w3
+        self.network = network
+        self.address = address
+        self.distribution = w3.to_checksum_address(network.rewards_distribution)
+        self.contract = w3.eth.contract(
+            address=w3.to_checksum_address(network.reward_treasury),
+            abi=REWARD_TREASURY_ABI,
+        )
+
+    def claimable(self) -> int:
+        return self.contract.functions.claimable(
+            self.distribution, self.address
+        ).call()
+
+    def build_claim(self, nonce: int, fees: dict, gas: int) -> dict:
+        return self.contract.functions.claim(self.distribution).build_transaction(
+            {
+                "from": self.address,
+                "nonce": nonce,
+                "chainId": self.network.chain_id,
+                "gas": gas,
+                **fees,
+            }
+        )
+
+    def estimate_claim_gas(self, worker_count: int) -> tuple[int, bool]:
+        """Estimate the sweep, falling back to a per-worker projection.
+
+        Estimation reverts when there is nothing to claim, which is exactly
+        when a dry run is most likely, so the fallback scales with the fleet
+        rather than being a single constant.
+        """
+        try:
+            return (
+                self.contract.functions.claim(self.distribution).estimate_gas(
+                    {"from": self.address}
+                ),
+                True,
+            )
+        except Exception:
+            return (
+                FALLBACK_CLAIM_BASE_GAS + CLAIM_GAS_PER_WORKER * worker_count,
+                False,
+            )
