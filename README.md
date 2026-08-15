@@ -165,8 +165,20 @@ put two workers under the same name.
 Names are allocated only to the peers a run actually registers, after the
 already-registered filter, so skipped peers never consume numbers.
 
-Lines with neither register unnamed. The contract's `updateMetadata` can name
-them later without re-bonding, so a missing or wrong name is not permanent.
+With neither, a friendly name is **generated** rather than leaving the node
+nameless — `lemon-bear`, `delicate-crayfish`, `smoky-quoll`. These come from
+[`coolname`](https://pypi.org/project/coolname/) (~370,000 two-word
+combinations), seeded from the peer ID rather than randomly, so:
+
+- the same peer always gets the same name, which makes `--dry-run` a truthful
+  preview and means a retry after a failure does not rename the node;
+- a collision with an already-used name picks the next name in that peer's own
+  deterministic sequence, so 1000 nodes come out unique without a static
+  wordlist to maintain.
+
+Precedence is: explicit column, then `--name-template`, then generated. There is
+deliberately no way to register nameless; the contract's `updateMetadata` can
+rename a worker later without re-bonding if you want something different.
 
 ## How `--limit` works
 

@@ -3,6 +3,7 @@ import json
 import pytest
 
 from sqdreg.naming import (
+    auto_name,
     MAX_METADATA_BYTES,
     NamingError,
     encode_metadata,
@@ -113,11 +114,15 @@ def test_prepare_validates_the_template_once_up_front():
         prepare([entry()], "sqd-{bad}")
 
 
-def test_prepare_with_no_template_leaves_unnamed_entries_empty():
+def test_an_entry_with_no_name_and_no_template_gets_a_generated_one():
+    """Nameless registration is unmanageable at 1000 nodes, so never happens."""
     prepared = prepare([entry(peer_id="a"), entry(peer_id="b", name="named")], None)
 
-    assert [p.name for p in prepared] == [None, "named"]
-    assert [p.metadata for p in prepared] == ["", '{"name":"named"}']
+    assert prepared[1].name == "named"
+    generated = prepared[0].name
+    assert generated and generated != "named"
+    assert "-" in generated  # a friendly two-word slug
+    assert prepared[0].metadata == '{"name":"%s"}' % generated
 
 
 def test_numbering_starts_at_one_regardless_of_file_position():
@@ -185,3 +190,51 @@ def test_a_template_without_n_does_not_hang():
     prepared = prepare(entries, "fixed-{peer_id}", used_names={"fixed-c"})
 
     assert [p.name for p in prepared] == ["fixed-c", "fixed-d"]
+
+
+# --- generated names --------------------------------------------------------
+
+
+def test_a_generated_name_is_stable_for_the_same_peer_id():
+    """Seeded from the peer ID, so --dry-run previews the real name."""
+    assert auto_name("peer-a") == auto_name("peer-a")
+
+
+def test_different_peers_get_different_names():
+    assert auto_name("peer-a") != auto_name("peer-b")
+
+
+def test_a_later_attempt_yields_a_different_but_stable_name():
+    first, second = auto_name("peer-a", 0), auto_name("peer-a", 1)
+
+    assert first != second
+    assert second == auto_name("peer-a", 1)
+
+
+def test_a_generated_name_that_is_taken_is_replaced_deterministically():
+    taken = {auto_name("a", 0)}
+
+    prepared = prepare([entry(peer_id="a")], None, used_names=taken)
+
+    assert prepared[0].name == auto_name("a", 1)
+
+
+def test_generated_names_are_unique_across_a_realistic_batch():
+    entries = [entry(peer_id=f"peer-{i}") for i in range(500)]
+
+    prepared = prepare(entries, None)
+
+    names = [p.name for p in prepared]
+    assert len(set(names)) == len(names)
+
+
+def test_an_explicit_name_still_wins_over_a_generated_one():
+    prepared = prepare([entry(peer_id="a", name="mine")], None)
+
+    assert prepared[0].name == "mine"
+
+
+def test_a_template_still_wins_over_a_generated_one():
+    prepared = prepare([entry(peer_id="a")], "sqd-{n:03d}")
+
+    assert prepared[0].name == "sqd-001"

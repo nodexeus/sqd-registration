@@ -6,11 +6,40 @@ node means registering it with {"name":"..."} (compact JSON, no spaces).
 """
 
 import json
+import random
 from dataclasses import dataclass
+
+from coolname import RandomGenerator
+from coolname.data import config as _coolname_config
 
 from sqdreg.peerids import PeerEntry
 
 MAX_METADATA_BYTES = 256
+
+
+# Two words give ~370,000 combinations. A 1000-node batch collides about five
+# times, which the caller's used-name check resolves; three words would make
+# that vanishingly rare but reads worse for no practical gain.
+AUTO_NAME_WORDS = 2
+# Defensive only. The sequence is deterministic and the space is large, so this
+# bound is never reached in practice.
+_MAX_AUTO_ATTEMPTS = 1000
+
+
+def auto_name(peer_id: str, attempt: int = 0) -> str:
+    """A friendly name derived deterministically from the peer ID.
+
+    Seeded from the peer ID rather than truly random, so a name is stable
+    across runs: `--dry-run` previews exactly what will be registered, and a
+    retry after a failure reuses the same name instead of inventing another.
+
+    `attempt` walks a different, equally deterministic name for the same peer
+    when the first is already taken.
+    """
+    generator = RandomGenerator(
+        _coolname_config, random.Random(f"{peer_id}:{attempt}")
+    )
+    return generator.generate_slug(AUTO_NAME_WORDS)
 
 
 class NamingError(ValueError):
@@ -101,7 +130,17 @@ def prepare(
         if entry.name:
             name = entry.name
         elif not template:
-            name = None
+            # No explicit name and no template: generate one rather than
+            # register the node nameless, which is unmanageable at scale.
+            for attempt in range(_MAX_AUTO_ATTEMPTS):
+                name = auto_name(entry.peer_id, attempt)
+                if name not in taken:
+                    break
+            else:
+                raise NamingError(
+                    f"could not find an unused generated name for "
+                    f"{entry.peer_id} after {_MAX_AUTO_ATTEMPTS} attempts"
+                )
         elif constant:
             name = template.format(n=next_n, peer_id=entry.peer_id)
         else:
