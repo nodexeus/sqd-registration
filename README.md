@@ -340,7 +340,9 @@ attempted.
 Read-only, and the only action that needs no credential — pass `--address` and
 it reports on any wallet. It prints a state breakdown, totals the SQD that is
 withdrawable right now, says when the next lock expires, and writes
-`<input>.<network>.status.csv` with a row per peer ID.
+`<input>.<network>.status.csv` with a row per peer ID. No field contains a
+comma, so nothing needs quoting and the file imports cleanly into a spreadsheet
+or splits correctly with `cut` and `awk`.
 
 A freshly registered worker does not go live immediately: `register()` sets
 `registeredAt = nextEpoch()`, so it shows as `registering` until that boundary

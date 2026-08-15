@@ -963,21 +963,26 @@ STATE_LABEL = {
 
 
 def status_rows(entries, states, lock_period, l1_block):
-    """One printable row per peer ID, plus the CSV record behind it."""
+    """One row per peer ID for the status CSV.
+
+    No thousands separators in any field: a comma inside a value forces the
+    writer to quote it, which is valid CSV but trips naive importers and makes
+    shell tools like cut and awk split the row in the wrong place.
+    """
     rows = []
     for entry, st in zip(entries, states):
         detail = ""
         if st.state == LOCKED and st.unlock_block:
             days = (st.unlock_block - l1_block) * 12 / 86400
-            detail = f"unlocks in ~{days:.1f} days (L1 block {st.unlock_block:,})"
+            detail = f"unlocks in ~{days:.1f} days at L1 block {st.unlock_block}"
         elif st.state == WITHDRAWABLE:
             detail = f"{format_units(st.bond, 18)} SQD ready to withdraw"
         elif st.state == REGISTERING and st.registered_at:
             hours = (st.registered_at - l1_block) * 12 / 3600
             detail = (
-                f"goes live at L1 block {st.registered_at:,} (~{hours:.1f} h)"
+                f"goes live in ~{hours:.1f} h at L1 block {st.registered_at}"
                 if st.registered_at > l1_block
-                else f"goes live at L1 block {st.registered_at:,}"
+                else f"goes live at L1 block {st.registered_at}"
             )
         elif st.state == FOREIGN:
             detail = f"creator {st.creator}"

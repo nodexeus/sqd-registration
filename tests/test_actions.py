@@ -470,3 +470,28 @@ def test_a_registering_worker_is_not_selected_for_deregister(tmp_path):
 
     assert [w.peer_id for w in work] == ["b"]
     assert not_ready[0][1].state == REGISTERING
+
+
+def test_no_status_csv_field_needs_quoting(tmp_path):
+    """A comma in any value forces quoting, which trips naive CSV importers."""
+    import csv as csvmod
+    from sqdreg.registry import LOCKED, REGISTERING
+
+    rows = bulk_register.status_rows(
+        [entry("a"), entry("b"), entry("c")],
+        [
+            state("a", LOCKED, unlock=11_495_400),
+            state("b", REGISTERING),
+            state("c", WITHDRAWABLE, bond=123456 * 10**18),
+        ],
+        lock_period=99_999,
+        l1_block=11_000_000,
+    )
+    out = tmp_path / "s.csv"
+    bulk_register.write_status_csv(str(out), rows)
+
+    raw = out.read_text()
+    assert '"' not in raw, "a field needed quoting, so it contains a comma"
+    # Still parses to the right shape.
+    parsed = list(csvmod.reader(out.open()))
+    assert len(parsed) == 4 and all(len(r) == 6 for r in parsed)
