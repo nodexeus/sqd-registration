@@ -312,3 +312,31 @@ def test_local_signing_still_defaults_to_the_network_rpc(monkeypatch):
         bulk_register.resolve_rpc_url(args, NETWORKS["tethys"])
         == NETWORKS["tethys"].rpc_url
     )
+
+
+# --- transaction hashes -----------------------------------------------------
+
+
+def test_a_hash_gets_a_0x_prefix():
+    """hexbytes 1.x drops it, leaving hashes unpasteable into an explorer."""
+    from hexbytes import HexBytes
+
+    assert bulk_register.tx_hash_hex(HexBytes("0xabcd")).startswith("0x")
+    assert bulk_register.tx_hash_hex("abcd") == "0xabcd"
+
+
+def test_an_already_prefixed_hash_is_not_doubled():
+    assert bulk_register.tx_hash_hex("0xabcd") == "0xabcd"
+
+
+def test_the_logged_hash_is_prefixed(tmp_path):
+    log = RunLog(tmp_path / "l.jsonl")
+    w3, signer, registry = remote_env(["abcd"], [1])
+
+    bulk_register.register_all(
+        w3, signer, registry, work("a"), log,
+        fees={"maxFeePerGas": 1, "maxPriorityFeePerGas": 0},
+        gas=100, network="mainnet",
+    )
+
+    assert log.records()[0].tx_hash == "0xabcd"

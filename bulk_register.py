@@ -252,6 +252,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--website",
+        help=(
+            "website recorded on every worker in this run, shown by the SQD "
+            "dashboard, e.g. https://www.example.com/"
+        ),
+    )
+    parser.add_argument(
+        "--description",
+        help="description recorded on every worker in this run",
+    )
+    parser.add_argument(
         "--batch",
         type=positive_int,
         default=DEFAULT_BATCH_SIZE,
@@ -362,6 +373,10 @@ def resume_command(args: argparse.Namespace) -> str:
     if args.peer_ids:
         for peer_id in args.peer_ids:
             parts += ["--peer-id", shlex.quote(peer_id)]
+    if args.website:
+        parts += ["--website", shlex.quote(args.website)]
+    if args.description:
+        parts += ["--description", shlex.quote(args.description)]
     if args.log:
         parts += ["--log", shlex.quote(args.log)]
     if args.rpc_url:
@@ -928,6 +943,17 @@ def build_signer(args, w3):
     return RemoteSigner(w3.to_checksum_address(chosen))
 
 
+def tx_hash_hex(value) -> str:
+    """A transaction hash as an operator can paste it into a block explorer.
+
+    hexbytes 1.x dropped the 0x prefix from .hex(), so hashes were being logged
+    and written to the CSV bare — not clickable, and not pasteable without
+    editing every row.
+    """
+    text = value.hex() if hasattr(value, "hex") else str(value)
+    return text if text.startswith("0x") else f"0x{text}"
+
+
 def wait_for(w3, tx_hash, timeout: int = RECEIPT_TIMEOUT) -> dict:
     """Wait for one receipt. Raises TimeExhausted past `timeout`."""
     return w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
@@ -948,11 +974,11 @@ def send_and_wait(w3, signer, tx, label: str = "transaction") -> tuple[str, dict
     try:
         payload, raw_hash = signer.prepare(tx)
         if raw_hash is not None:
-            tx_hash = raw_hash.hex()
+            tx_hash = tx_hash_hex(raw_hash)
         sent = signer.dispatch(w3, payload)
         if raw_hash is None:
             raw_hash = sent
-            tx_hash = raw_hash.hex() if hasattr(raw_hash, "hex") else str(raw_hash)
+            tx_hash = tx_hash_hex(raw_hash)
     except Exception as exc:
         raise SendFailed(exc, tx_hash) from exc
     print(f"  {label} sent ({tx_hash}); waiting for the receipt", flush=True)
@@ -1042,14 +1068,12 @@ def register_all(
         try:
             payload, raw_hash = signer.prepare(tx)
             if raw_hash is not None:
-                tx_hash = raw_hash.hex()
+                tx_hash = tx_hash_hex(raw_hash)
             dispatched = True
             sent = signer.dispatch(w3, payload)
             if raw_hash is None:
                 raw_hash = sent
-                tx_hash = (
-                    raw_hash.hex() if hasattr(raw_hash, "hex") else str(raw_hash)
-                )
+                tx_hash = tx_hash_hex(raw_hash)
         except KeyboardInterrupt:
             log_pending(item, tx_hash, "interrupted while sending")
             result.interrupted = True
@@ -1552,7 +1576,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         work = prepare(
-            selected, args.name_template, taken, batch_size=args.batch
+            selected,
+            args.name_template,
+            taken,
+            batch_size=args.batch,
+            website=args.website,
+            description=args.description,
         )
     except NamingError as exc:
         fail(str(exc))

@@ -326,3 +326,60 @@ def test_batch_words_are_drawn_across_categories():
         animals |= set(config[key]["words"])
     # Some animals are fine; all of them would mean a single-category pool.
     assert not words <= animals
+
+
+# --- website and description -----------------------------------------------
+
+
+def test_website_and_description_are_encoded_alongside_the_name():
+    metadata = encode_metadata("w1", "https://example.com/", "Hosted by Example")
+
+    assert json.loads(metadata) == {
+        "name": "w1",
+        "website": "https://example.com/",
+        "description": "Hosted by Example",
+    }
+
+
+def test_absent_fields_are_omitted_not_blank():
+    """A blank website is worse than none: the indexer would show "" not null."""
+    assert json.loads(encode_metadata("w1")) == {"name": "w1"}
+    assert json.loads(encode_metadata("w1", website="https://x")) == {
+        "name": "w1",
+        "website": "https://x",
+    }
+
+
+def test_metadata_key_order_is_stable():
+    """Byte length feeds the gas estimate, so the encoding must be predictable."""
+    first = encode_metadata("w1", "https://x", "d")
+    assert first == encode_metadata("w1", "https://x", "d")
+    assert first.index('"name"') < first.index('"website"') < first.index('"description"')
+
+
+def test_a_worker_with_only_a_website_still_encodes():
+    assert json.loads(encode_metadata(None, "https://x")) == {"website": "https://x"}
+
+
+def test_nothing_at_all_encodes_empty():
+    assert encode_metadata(None, None, None) == ""
+
+
+def test_the_cap_error_points_at_the_run_wide_fields():
+    with pytest.raises(NamingError, match="apply to every node"):
+        encode_metadata("w1", "https://x", "d" * 300)
+
+
+def test_prepare_applies_the_fields_to_every_entry():
+    entries = [entry(peer_id="a"), entry(peer_id="b", name="explicit")]
+
+    prepared = prepare(
+        entries, None, website="https://nodexeus.com/", description="Hosted"
+    )
+
+    for item in prepared:
+        parsed = json.loads(item.metadata)
+        assert parsed["website"] == "https://nodexeus.com/"
+        assert parsed["description"] == "Hosted"
+    # and the names are still per-entry
+    assert json.loads(prepared[1].metadata)["name"] == "explicit"

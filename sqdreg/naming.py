@@ -114,16 +114,27 @@ def resolve_name(entry: PeerEntry, template: str | None) -> str | None:
     return None
 
 
-def encode_metadata(name: str | None) -> str:
-    """Encode a name as the metadata string the contract stores."""
-    if not name:
+def encode_metadata(
+    name: str | None, website: str | None = None, description: str | None = None
+) -> str:
+    """Encode worker metadata as the string the contract stores.
+
+    The indexer parses this JSON and exposes `name`, `website` and
+    `description` as fields on the worker — confirmed against a live
+    registration. Empty values are omitted rather than written as "", so a
+    worker with no website has a null website rather than a blank one.
+    """
+    fields = {"name": name, "website": website, "description": description}
+    present = {k: v for k, v in fields.items() if v}
+    if not present:
         return ""
-    metadata = json.dumps({"name": name}, separators=(",", ":"), ensure_ascii=False)
+    metadata = json.dumps(present, separators=(",", ":"), ensure_ascii=False)
     size = len(metadata.encode())
     if size > MAX_METADATA_BYTES:
         raise NamingError(
-            f"metadata for name {name!r} is {size} bytes, "
-            f"over the {MAX_METADATA_BYTES}-byte cap"
+            f"metadata for name {name!r} is {size} bytes, over the "
+            f"{MAX_METADATA_BYTES}-byte cap. Shorten the website or "
+            f"description, which apply to every node in the run."
         )
     return metadata
 
@@ -141,6 +152,8 @@ def prepare(
     used_names: frozenset[str] | set[str] = frozenset(),
     batch_size: int = DEFAULT_BATCH_SIZE,
     rng=None,
+    website: str | None = None,
+    description: str | None = None,
 ) -> list[NamedPeer]:
     """Resolve and encode names for the entries about to be registered.
 
@@ -203,6 +216,10 @@ def prepare(
         if name:
             taken.add(name)
         prepared.append(
-            NamedPeer(entry=entry, name=name, metadata=encode_metadata(name))
+            NamedPeer(
+                entry=entry,
+                name=name,
+                metadata=encode_metadata(name, website, description),
+            )
         )
     return prepared

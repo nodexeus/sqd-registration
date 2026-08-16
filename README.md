@@ -67,6 +67,8 @@ instead and tells you to set an environment variable.
 | `--network` | `mainnet` (default) or `tethys` |
 | `-n`, `--limit` | Register at most this many *new* nodes |
 | `--name-template` | Name for lines without an explicit name |
+| `--website` | Website recorded on every worker in the run |
+| `--description` | Description recorded on every worker in the run |
 | `--batch` | Nodes per generated-name batch (default 50) |
 | `--dry-run` | Run every check, print the plan, send nothing |
 | `--yes` | Skip the confirmation prompt |
@@ -204,6 +206,32 @@ strings.
 Precedence is: explicit column, then `--name-template`, then batch-generated.
 There is deliberately no way to register nameless; `updateMetadata` can rename a
 worker later without re-bonding.
+
+### Website and description
+
+`--website` and `--description` are recorded on **every** worker in the run,
+since they describe the operator rather than the node:
+
+    ./sqd peer_ids.txt \
+        --website 'https://www.example.com/' \
+        --description 'Hosting provided by Example Technologies'
+
+The stored metadata becomes:
+
+    {"name":"garnet-BFJnLd","website":"https://www.example.com/","description":"..."}
+
+The indexer parses this and exposes all three as worker fields, so they appear in
+the SQD dashboard. Absent values are omitted rather than written as `""`, so a
+worker with no website reads as null rather than blank.
+
+Both are echoed back in the resume hint, because a resume without them would
+register the remaining nodes with no website or description.
+
+Watch the byte cap: metadata is capped at 256 bytes and costs roughly 915 gas
+per byte. A name alone is around 24 bytes; adding a website and a description
+typically takes it to ~120, which raises each registration by about 88,000 gas —
+under 0.0001 ETH across 1000 nodes, so the cost is immaterial, but a very long
+description can hit the cap.
 
 ## How `--limit` works
 
