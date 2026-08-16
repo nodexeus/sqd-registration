@@ -29,10 +29,12 @@ for arg in "$@"; do
   prev="$arg"
 done
 
-if [[ -f "$here/fireblocks.env" ]]; then
+# Overridable so tests never have to write to the operator's real config.
+env_file="${SQD_ENV_FILE:-$here/fireblocks.env}"
+if [[ -f "$env_file" ]]; then
   set -a
   # shellcheck disable=SC1091
-  source "$here/fireblocks.env"
+  source "$env_file"
   set +a
 fi
 

@@ -87,14 +87,24 @@ WRAPPER = os.path.join(REPO, "sqd")
 
 
 def run_wrapper(tmp_path, args, api_key="stub-key"):
-    """Run ./sqd with a stub proxy that just reports its arguments."""
+    """Run ./sqd with a stub proxy that just reports its arguments.
+
+    Both the proxy and the config file are redirected into tmp_path. Nothing
+    here may touch the operator's real fireblocks.env: it holds credentials
+    that cannot be regenerated from anything in the repo.
+    """
     stub = tmp_path / "stub-proxy"
     stub.write_text('#!/usr/bin/env bash\necho "PROXY_ARGS: $*"\n')
     stub.chmod(0o755)
-    env = dict(os.environ, SQD_PROXY=str(stub))
-    env.pop("FIREBLOCKS_API_KEY", None)
+
+    env_file = tmp_path / "fireblocks.env"
     if api_key:
-        env["FIREBLOCKS_API_KEY"] = api_key
+        env_file.write_text(f"FIREBLOCKS_API_KEY={api_key}\n")
+    else:
+        env_file.write_text("")  # exists but configures nothing
+
+    env = dict(os.environ, SQD_PROXY=str(stub), SQD_ENV_FILE=str(env_file))
+    env.pop("FIREBLOCKS_API_KEY", None)
     return subprocess.run(
         [WRAPPER, *args], capture_output=True, text=True, env=env, cwd=REPO
     )
@@ -150,9 +160,30 @@ def test_an_unknown_network_fails_before_starting_the_proxy(tmp_path):
 
 def test_without_a_key_the_wrapper_signs_locally(tmp_path):
     """No FIREBLOCKS_API_KEY means no proxy and no --signer flag."""
-    if os.path.exists(os.path.join(REPO, "fireblocks.env")):
-        pytest.skip("fireblocks.env present, so the wrapper routes remotely")
     run = run_wrapper(tmp_path, ["--help"], api_key=None)
 
     assert "PROXY_ARGS" not in run.stdout
     assert "usage: bulk_register.py" in run.stdout
+
+
+def test_the_tests_never_touch_the_real_config(tmp_path):
+    """A guard on the test harness itself.
+
+    An earlier version of these tests wrote a stub to the operator's real
+    fireblocks.env and deleted it afterwards, destroying credentials that
+    nothing in the repo can regenerate.
+    """
+    real = os.path.join(REPO, "fireblocks.env")
+    before = os.path.exists(real)
+    digest = None
+    if before:
+        with open(real, "rb") as handle:
+            digest = handle.read()
+
+    run_wrapper(tmp_path, ["peers.txt", "--network", "tethys"])
+    run_wrapper(tmp_path, ["--help"], api_key=None)
+
+    assert os.path.exists(real) == before, "the real config was created or removed"
+    if before:
+        with open(real, "rb") as handle:
+            assert handle.read() == digest, "the real config was modified"
