@@ -171,7 +171,7 @@ def test_connect_accepts_matching_chain_id():
     w3 = MagicMock()
     w3.eth.chain_id = 42161
     with patch.object(bulk_register, "Web3", return_value=w3):
-        assert bulk_register.connect(NETWORKS["mainnet"], None) is w3
+        assert bulk_register.connect(NETWORKS["mainnet"], "http://rpc.test") is w3
 
 
 def test_connect_exits_on_chain_id_mismatch(capsys):
@@ -179,7 +179,7 @@ def test_connect_exits_on_chain_id_mismatch(capsys):
     w3.eth.chain_id = 421614
     with patch.object(bulk_register, "Web3", return_value=w3):
         with pytest.raises(SystemExit) as exc:
-            bulk_register.connect(NETWORKS["mainnet"], None)
+            bulk_register.connect(NETWORKS["mainnet"], "http://rpc.test")
     assert exc.value.code == 2
     assert "42161" in capsys.readouterr().err
 
@@ -189,7 +189,7 @@ def test_connect_exits_on_chain_id_mismatch_reverse(capsys):
     w3.eth.chain_id = 42161
     with patch.object(bulk_register, "Web3", return_value=w3):
         with pytest.raises(SystemExit) as exc:
-            bulk_register.connect(NETWORKS["tethys"], None)
+            bulk_register.connect(NETWORKS["tethys"], "http://rpc.test")
     assert exc.value.code == 2
     assert "421614" in capsys.readouterr().err
 

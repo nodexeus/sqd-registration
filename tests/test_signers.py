@@ -243,3 +243,72 @@ def test_local_signing_never_asks_the_endpoint_for_accounts(monkeypatch):
 
     assert isinstance(signer, bulk_register.LocalSigner)
     assert signer.manages_nonce is False
+
+
+# --- endpoint resolution ----------------------------------------------------
+
+
+def test_an_ipc_path_gets_an_ipc_provider():
+    """The proxy listens on a unix socket unless started with --http."""
+    from web3 import Web3
+
+    provider = bulk_register.provider_for("/Users/x/.fireblocks/json-rpc.ipc")
+
+    assert isinstance(provider, Web3.IPCProvider)
+
+
+def test_a_url_gets_an_http_provider():
+    from web3 import Web3
+
+    assert isinstance(
+        bulk_register.provider_for("http://127.0.0.1:8545"), Web3.HTTPProvider
+    )
+
+
+def test_the_proxy_address_is_picked_up_from_the_environment(monkeypatch):
+    """The proxy exports it into the child, so the child needs no plumbing."""
+    from sqdreg.networks import NETWORKS
+
+    monkeypatch.setenv("FIREBLOCKS_JSON_RPC_ADDRESS", "/tmp/fb.ipc")
+    args = MagicMock(rpc_url=None, signer="fireblocks")
+
+    assert (
+        bulk_register.resolve_rpc_url(args, NETWORKS["tethys"]) == "/tmp/fb.ipc"
+    )
+
+
+def test_an_explicit_rpc_url_wins(monkeypatch):
+    from sqdreg.networks import NETWORKS
+
+    monkeypatch.setenv("FIREBLOCKS_JSON_RPC_ADDRESS", "/tmp/fb.ipc")
+    args = MagicMock(rpc_url="http://explicit", signer="fireblocks")
+
+    assert (
+        bulk_register.resolve_rpc_url(args, NETWORKS["tethys"]) == "http://explicit"
+    )
+
+
+def test_fireblocks_without_an_endpoint_explains_the_wrapper(monkeypatch, capsys):
+    from sqdreg.networks import NETWORKS
+
+    monkeypatch.delenv("FIREBLOCKS_JSON_RPC_ADDRESS", raising=False)
+    args = MagicMock(rpc_url=None, signer="fireblocks")
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.resolve_rpc_url(args, NETWORKS["tethys"])
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "fireblocks-json-rpc --chainId 421614" in err
+
+
+def test_local_signing_still_defaults_to_the_network_rpc(monkeypatch):
+    from sqdreg.networks import NETWORKS
+
+    monkeypatch.setenv("FIREBLOCKS_JSON_RPC_ADDRESS", "/tmp/fb.ipc")
+    args = MagicMock(rpc_url=None, signer="local")
+
+    assert (
+        bulk_register.resolve_rpc_url(args, NETWORKS["tethys"])
+        == NETWORKS["tethys"].rpc_url
+    )

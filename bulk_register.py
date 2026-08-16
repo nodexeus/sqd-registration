@@ -416,10 +416,49 @@ def load_signer() -> LocalAccount:
     return prompt_for_secret()
 
 
-def connect(network, rpc_url: str | None) -> Web3:
+def provider_for(endpoint: str):
+    """Pick a provider from the endpoint's shape.
+
+    fireblocks-json-rpc listens on a unix socket by default and prints a
+    filesystem path rather than a URL, so an HTTP-only client cannot talk to it
+    unless it was started with --http.
+    """
+    if endpoint.startswith(("http://", "https://")):
+        return Web3.HTTPProvider(endpoint)
+    if endpoint.startswith(("ws://", "wss://")):
+        return Web3.LegacyWebSocketProvider(endpoint)
+    return Web3.IPCProvider(endpoint)
+
+
+def resolve_rpc_url(args, network) -> str:
+    """The endpoint for this run.
+
+    Under --signer fireblocks, fall back to the address the proxy exports into
+    its child's environment, so the wrapped command needs no plumbing of its
+    own — and so the shell cannot expand that variable before the proxy has
+    even set it.
+    """
+    if args.rpc_url:
+        return args.rpc_url
+    if args.signer == FIREBLOCKS_SIGNER:
+        exported = os.getenv("FIREBLOCKS_JSON_RPC_ADDRESS")
+        if exported:
+            return exported
+        fail(
+            "--signer fireblocks needs the fireblocks-json-rpc endpoint.\n"
+            "       Either run this command as a child of the proxy, which "
+            "exports FIREBLOCKS_JSON_RPC_ADDRESS:\n"
+            "           fireblocks-json-rpc --chainId "
+            f"{network.chain_id} -- <this command>\n"
+            "       or pass --rpc-url with the address it prints."
+        )
+    return network.rpc_url
+
+
+def connect(network, rpc_url: str) -> Web3:
     """Connect to the RPC and refuse to continue on the wrong chain."""
-    endpoint = rpc_url or network.rpc_url
-    w3 = Web3(Web3.HTTPProvider(endpoint))
+    endpoint = rpc_url
+    w3 = Web3(provider_for(endpoint))
     try:
         chain_id = w3.eth.chain_id
     except Exception as exc:
@@ -1424,7 +1463,7 @@ def main(argv: list[str] | None = None) -> int:
                 "It takes a wallet address (0x...); for a peer ID use --peer-id."
             )
 
-    w3 = connect(network, args.rpc_url)
+    w3 = connect(network, resolve_rpc_url(args, network))
 
     # Status is read-only, so an address is enough and no signer is needed.
     if args.action == STATUS and args.address:

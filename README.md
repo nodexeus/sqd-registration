@@ -316,9 +316,25 @@ Fireblocks holds keys as MPC shares and **cannot export a private key**, so
 `eth_sendTransaction`, for the RPC endpoint to sign:
 
     npm install -g @fireblocks/fireblocks-json-rpc
-    fireblocks-json-rpc --http -- \
+
+    export FIREBLOCKS_API_KEY=<uuid>
+    export FIREBLOCKS_API_PRIVATE_KEY_PATH=/path/to/fireblocks_secret.key
+    export FIREBLOCKS_API_BASE_URL=https://sandbox-api.fireblocks.io   # sandbox
+    export FIREBLOCKS_VAULT_ACCOUNT_IDS=0
+
+    fireblocks-json-rpc --chainId 421614 -- \
         .venv/bin/python bulk_register.py peer_ids.txt \
-            --signer fireblocks --rpc-url $FIREBLOCKS_JSON_RPC_URL
+            --signer fireblocks --network tethys --action status
+
+The proxy exports its listening address to the wrapped command as
+`FIREBLOCKS_JSON_RPC_ADDRESS`, and `--signer fireblocks` reads it, so no
+`--rpc-url` is needed. Do not write `--rpc-url $FIREBLOCKS_JSON_RPC_ADDRESS`
+yourself: the outer shell expands that before the proxy has set it.
+
+By default the proxy listens on a unix socket rather than a port, and the
+address it exports is a filesystem path; the script picks an IPC or HTTP
+provider from the shape of the address, so either works. Use `--http` if you
+prefer a port.
 
 The mechanism is generic — anything that speaks `eth_sendTransaction` and signs
 works — but Fireblocks is the case it was built for.
