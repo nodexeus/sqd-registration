@@ -189,13 +189,15 @@ def test_the_address_comes_from_the_endpoint():
 
 
 def test_address_selects_among_several_vault_accounts():
+    """Matched case-insensitively, but the signer's own form is what is used —
+    the address that signs should be the one the signer reports holding."""
     w3 = MagicMock()
     w3.eth.accounts = ["0xaaa", "0xBBB"]
     w3.to_checksum_address.side_effect = lambda v: v
 
     signer = bulk_register.build_signer(args_for(address="0xbbb"), w3)
 
-    assert signer.address == "0xbbb"
+    assert signer.address == "0xBBB"
 
 
 def test_an_address_the_signer_does_not_offer_is_rejected(capsys):
@@ -396,3 +398,43 @@ def test_a_vault_holding_the_required_account_is_used():
     signer = bulk_register.build_signer(args_for(), w3, required=needed)
 
     assert signer.address == needed
+
+
+def test_the_required_account_is_chosen_from_several_vault_accounts(capsys):
+    """A workspace can expose many vault accounts. Taking the first would sign
+    as the wrong one whenever the required account is not at the front."""
+    needed = "0xA205c6e35e0814B0A602b016B539E819807f27F3"
+    w3 = MagicMock()
+    w3.eth.accounts = [
+        "0x000000000000000000000000000000000000dEaD",
+        needed,
+        "0x000000000000000000000000000000000000bEEF",
+    ]
+    w3.to_checksum_address.side_effect = lambda v: v
+
+    signer = bulk_register.build_signer(args_for(), w3, required=needed)
+
+    assert signer.address == needed
+    assert "of 3 offered" in capsys.readouterr().out
+
+
+def test_case_differences_do_not_defeat_the_match():
+    needed = "0xA205c6e35e0814B0A602b016B539E819807f27F3"
+    w3 = MagicMock()
+    w3.eth.accounts = [needed.lower()]
+    w3.to_checksum_address.side_effect = lambda v: v
+
+    assert bulk_register.build_signer(
+        args_for(), w3, required=needed
+    ).address == needed.lower()
+
+
+def test_without_a_required_account_the_first_is_used_with_a_warning(capsys):
+    w3 = MagicMock()
+    w3.eth.accounts = ["0xaaa", "0xbbb"]
+    w3.to_checksum_address.side_effect = lambda v: v
+
+    signer = bulk_register.build_signer(args_for(), w3, required=None)
+
+    assert signer.address == "0xaaa"
+    assert "does not name one" in capsys.readouterr().err

@@ -60,7 +60,7 @@ From your Fireblocks administrator:
 | An **API user** allowed to initiate transactions | The tool authenticates as this user |
 | Its **API key** (a UUID) | Identifies that user |
 | Its **RSA private key** file | Signs API requests. Generated when the API user is created |
-| The **vault account ID** | Which account to act as. The first is `0`, not `1` |
+| The **vault account ID**, or several | Which accounts to act as. The first is `0`, not `1`. `FIREBLOCKS_VAULT_ACCOUNT_IDS` takes a comma-separated list |
 
 The vault account also needs the chain's native asset enabled — **ETH on
 Arbitrum One** — or the tool cannot see an address to act as.
@@ -76,6 +76,15 @@ through Fireblocks. It is gitignored, and so is `*.key`.
 `--signer local` to any individual run whose account is a key you hold — that
 run skips Fireblocks entirely. There is no need to create and delete the file
 between phases.
+
+**If several accounts are in Fireblocks, list every vault account ID.** The
+tool works out which account a given run needs and picks that one, so a job
+spanning many accounts is configured once rather than steered by hand:
+
+    FIREBLOCKS_VAULT_ACCOUNT_IDS=0,1,4,7
+
+If a run needs an account the workspace does not hold, it says so and points at
+`--signer local`.
 
 > **Those credentials are signing authority.** An API key plus its RSA key,
 > combined with a policy that approves these calls, can move funds from that

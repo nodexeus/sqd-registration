@@ -1024,19 +1024,27 @@ def build_signer(args, w3, required: str | None = None):
             "need it."
         )
 
+    by_address = {a.lower(): a for a in accounts}
     if args.address:
-        chosen = args.address
-        if chosen.lower() not in {a.lower() for a in accounts}:
+        chosen = by_address.get(args.address.lower())
+        if chosen is None:
             fail(
-                f"--address {chosen} is not offered by the signer. "
+                f"--address {args.address} is not offered by the signer. "
                 f"Available: {', '.join(accounts)}"
             )
+    elif required and required.lower() in by_address:
+        # A workspace can expose several vault accounts at once. Picking the
+        # one this run actually needs means a job spanning many accounts is
+        # configured once, rather than selected by hand per run.
+        chosen = by_address[required.lower()]
+        if len(accounts) > 1:
+            print(f"vault account: {chosen} (of {len(accounts)} offered)")
     else:
         chosen = accounts[0]
         if len(accounts) > 1:
             print(
-                f"warning: signer offers {len(accounts)} accounts; using "
-                f"{chosen}. Pass --address to choose another.",
+                f"warning: signer offers {len(accounts)} accounts and this run "
+                f"does not name one; using {chosen}. Pass --address to choose.",
                 file=sys.stderr,
             )
     return RemoteSigner(w3.to_checksum_address(chosen))

@@ -43,9 +43,13 @@ tells you which before asking for a credential. If you give it the wrong one it
 stops immediately rather than sending anything.
 
 **These accounts are not all in the same place.** The account registering the
-replacements is in Fireblocks; the nine that hold the existing workers may not
-be. Leave `fireblocks.env` in place throughout, and add `--signer local` to any
-run whose account is a key you hold:
+replacements is in Fireblocks; the nine holding the existing workers may or may
+not be — you do not need to know in advance.
+
+If several are in Fireblocks, list all their vault account IDs in
+`fireblocks.env` (`FIREBLOCKS_VAULT_ACCOUNT_IDS=0,1,4`) and each run picks the
+one it needs. Leave the file in place throughout, and add `--signer local` to
+any run whose account is a key held outside Fireblocks:
 
     ./sqd batches/peers-01-eoa-5CF5A099-275.txt --action deregister --signer local
 
