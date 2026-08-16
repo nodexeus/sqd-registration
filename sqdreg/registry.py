@@ -338,13 +338,21 @@ class Registry:
 
     # --- writes ---
 
-    def _base_tx(self, nonce: int, fees: dict) -> dict:
-        return {
+    def _base_tx(self, nonce: int | None, fees: dict) -> dict:
+        """Common transaction fields.
+
+        `nonce=None` omits it, for signers that assign their own — Fireblocks
+        maintains its own nonce sequence per vault account, and supplying one
+        would fight it.
+        """
+        tx = {
             "from": self.address,
-            "nonce": nonce,
             "chainId": self.network.chain_id,
             **fees,
         }
+        if nonce is not None:
+            tx["nonce"] = nonce
+        return tx
 
     def build_approve(self, amount: int, nonce: int, fees: dict) -> dict:
         return self.token().functions.approve(
@@ -456,16 +464,16 @@ class Treasury:
             self.distribution, self.address
         ).call()
 
-    def build_claim(self, nonce: int, fees: dict, gas: int) -> dict:
-        return self.contract.functions.claim(self.distribution).build_transaction(
-            {
-                "from": self.address,
-                "nonce": nonce,
-                "chainId": self.network.chain_id,
-                "gas": gas,
-                **fees,
-            }
-        )
+    def build_claim(self, nonce: int | None, fees: dict, gas: int) -> dict:
+        tx = {
+            "from": self.address,
+            "chainId": self.network.chain_id,
+            "gas": gas,
+            **fees,
+        }
+        if nonce is not None:
+            tx["nonce"] = nonce
+        return self.contract.functions.claim(self.distribution).build_transaction(tx)
 
     def estimate_claim_gas(self, worker_count: int) -> tuple[int, bool]:
         """Estimate the sweep, falling back to a per-worker projection.

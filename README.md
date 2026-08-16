@@ -73,7 +73,8 @@ instead and tells you to set an environment variable.
 | `--rpc-url` | Override the network's default RPC |
 | `--action` | `register` (default), `deregister`, `withdraw`, `claim`, or `status` |
 | `--peer-id` | Act on this peer ID only, instead of the whole file; repeat for several |
-| `--address` | Wallet to report on for `--action status`, so no credential is needed |
+| `--signer` | `local` (default) or `fireblocks` — see below |
+| `--address` | Wallet to report on for `--action status`; with `--signer fireblocks`, which vault account to use |
 | `--log` | Result log path (default `<input>.<network>.run.jsonl`) |
 
 Every real run also writes `<input>.<network>.registered.csv` — one row per
@@ -306,6 +307,42 @@ across 1000 nodes shorter names save ~0.0002 ETH, dropping names entirely saves
 node, and each costs something real (worse names, or a permanent change to which
 address owns the workers). Batching is worth considering for hardware-wallet
 signing convenience, turning 1000 confirmations into ~15, but not for gas.
+
+## Signing with Fireblocks (or any signing proxy)
+
+Fireblocks holds keys as MPC shares and **cannot export a private key**, so
+`PRIVATE_KEY`, `MNEMONIC` and the prompt are all unusable for such a wallet.
+`--signer fireblocks` instead sends transactions *unsigned* over
+`eth_sendTransaction`, for the RPC endpoint to sign:
+
+    npm install -g @fireblocks/fireblocks-json-rpc
+    fireblocks-json-rpc --http -- \
+        .venv/bin/python bulk_register.py peer_ids.txt \
+            --signer fireblocks --rpc-url $FIREBLOCKS_JSON_RPC_URL
+
+The mechanism is generic — anything that speaks `eth_sendTransaction` and signs
+works — but Fireblocks is the case it was built for.
+
+Two things differ from local signing:
+
+- **The signer owns the nonce.** Fireblocks keeps its own sequence per vault
+  account, so no nonce is supplied and none is tracked.
+- **A failed send yields no transaction hash**, because the hash only exists
+  once the remote side has signed. Such an attempt is logged `pending` with no
+  hash and the run stops; recovery is the Fireblocks console, which records
+  every transaction it was asked to sign.
+
+The receipt wait is also longer (900 s vs 300 s), because each transaction is
+queued for policy evaluation and MPC signing before it is even broadcast.
+
+`--address` selects which vault account to use when the endpoint offers several.
+
+> **Check the approval policy before a large run.** Fireblocks evaluates every
+> transaction against its Transaction Authorization Policy. Automated signing
+> needs an **API Co-Signer** plus a TAP rule that approves these calls;
+> otherwise each transaction waits for a human in the console — untenable for
+> 1000 registrations. That is a policy change in their workspace, not a code
+> change here.
 
 ## The other three actions
 

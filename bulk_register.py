@@ -106,6 +106,15 @@ ACTIONS = (REGISTER, DEREGISTER, WITHDRAW, CLAIM, STATUS)
 # distributor sweeps every worker the wallet owns in one transaction.
 WALLET_ACTIONS = (CLAIM,)
 
+LOCAL_SIGNER = "local"
+FIREBLOCKS_SIGNER = "fireblocks"
+SIGNERS = (LOCAL_SIGNER, FIREBLOCKS_SIGNER)
+
+# Fireblocks queues each transaction for policy evaluation and MPC signing
+# before it is broadcast, so the round trip is materially slower than a local
+# signature. The receipt wait has to allow for that on top of block time.
+FIREBLOCKS_RECEIPT_TIMEOUT = 900
+
 # The worker state each action requires. register() also accepts a slot this
 # account previously vacated, which reads as UNREGISTERED.
 ACTIONABLE_STATE = {
@@ -249,6 +258,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "act on this peer ID only, instead of the whole file; repeat for "
             "several. Each must appear in the file"
+        ),
+    )
+    parser.add_argument(
+        "--signer",
+        choices=SIGNERS,
+        default=LOCAL_SIGNER,
+        help=(
+            "local (default) signs with PRIVATE_KEY/MNEMONIC/prompt. "
+            "fireblocks sends unsigned transactions over eth_sendTransaction "
+            "for the RPC endpoint to sign — point --rpc-url at a running "
+            "fireblocks-json-rpc, which holds no exportable key"
         ),
     )
     parser.add_argument(
@@ -737,12 +757,111 @@ def is_transport_error(exc: BaseException) -> bool:
     return isinstance(exc, (OSError, ProviderConnectionError, json.JSONDecodeError))
 
 
-def wait_for(w3, tx_hash) -> dict:
-    """Wait for one receipt. Raises TimeExhausted past RECEIPT_TIMEOUT."""
-    return w3.eth.wait_for_transaction_receipt(tx_hash, timeout=RECEIPT_TIMEOUT)
+class LocalSigner:
+    """Signs with a key this process holds.
+
+    Knows the hash before broadcasting, which is what lets a failed send still
+    be logged with something the operator can look up.
+    """
+
+    manages_nonce = False
+    receipt_timeout = RECEIPT_TIMEOUT
+
+    def __init__(self, account):
+        self.account = account
+        self.address = account.address
+
+    def prepare(self, tx):
+        """Sign, returning (payload, hash). The hash is known before sending."""
+        signed = self.account.sign_transaction(tx)
+        return signed, signed.hash
+
+    def dispatch(self, w3, payload):
+        w3.eth.send_raw_transaction(payload.raw_transaction)
+        return None  # the hash came from prepare()
 
 
-def send_and_wait(w3, account, tx, label: str = "transaction") -> tuple[str, dict]:
+class RemoteSigner:
+    """Hands unsigned transactions to the RPC endpoint to sign.
+
+    For Fireblocks, where the key is split across MPC shares and cannot be
+    exported: `fireblocks-json-rpc` accepts eth_sendTransaction, applies the
+    workspace's policy, signs, and broadcasts.
+
+    Two consequences the local path does not have:
+
+    - The nonce belongs to the signer. Fireblocks keeps its own sequence per
+      vault account, so supplying one would fight it.
+    - A failed submit yields no hash, because the hash only exists once the
+      remote side has signed. Recovery is the Fireblocks console, which records
+      every transaction it was asked to sign.
+    """
+
+    manages_nonce = True
+    receipt_timeout = FIREBLOCKS_RECEIPT_TIMEOUT
+
+    def __init__(self, address: str):
+        self.account = None
+        self.address = address
+
+    def prepare(self, tx):
+        """Nothing to sign here, so no hash exists yet."""
+        return tx, None
+
+    def dispatch(self, w3, payload):
+        return w3.eth.send_transaction(payload)
+
+
+def build_signer(args, w3):
+    """The signer for this run: a local key, or the RPC endpoint itself."""
+    if args.signer != FIREBLOCKS_SIGNER:
+        return LocalSigner(load_signer())
+
+    try:
+        accounts = list(w3.eth.accounts)
+    except Exception as exc:
+        fail(
+            f"cannot list accounts from {args.rpc_url or 'the RPC endpoint'}: "
+            f"{exc}\n"
+            "       --signer fireblocks needs --rpc-url pointing at a running "
+            "fireblocks-json-rpc\n"
+            "       (npm install -g @fireblocks/fireblocks-json-rpc)"
+        )
+    if not accounts:
+        fail(
+            f"{args.rpc_url or 'the RPC endpoint'} reports no accounts, so it "
+            "cannot sign.\n"
+            "       An ordinary RPC node answers eth_accounts with an empty "
+            "list, so the usual cause is\n"
+            "       --rpc-url pointing at a node rather than at a running "
+            "fireblocks-json-rpc.\n"
+            "       If it is the proxy, check the vault account has this chain's "
+            "asset enabled."
+        )
+    if args.address:
+        chosen = args.address
+        if chosen.lower() not in {a.lower() for a in accounts}:
+            fail(
+                f"--address {chosen} is not offered by the signer. "
+                f"Available: {', '.join(accounts)}"
+            )
+    else:
+        chosen = accounts[0]
+        if len(accounts) > 1:
+            print(
+                f"warning: signer offers {len(accounts)} accounts; using "
+                f"{chosen}. Pass --address to choose another.",
+                file=sys.stderr,
+            )
+    return RemoteSigner(w3.to_checksum_address(chosen))
+
+
+def wait_for(w3, tx_hash, timeout: int = RECEIPT_TIMEOUT) -> dict:
+    """Wait for one receipt. Raises TimeExhausted past `timeout`."""
+    return w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
+
+
+def send_and_wait(w3, signer, tx, label: str = "transaction") -> tuple[str, dict]:
     """Sign, send, and wait for one standalone transaction, e.g. the approval.
 
     Raises SendFailed carrying the hash whenever signing got far enough to know
@@ -755,25 +874,35 @@ def send_and_wait(w3, account, tx, label: str = "transaction") -> tuple[str, dic
     """
     tx_hash = None
     try:
-        raw, raw_hash = sign_tx(account, tx)
-        tx_hash = raw_hash.hex()
-        w3.eth.send_raw_transaction(raw)
+        payload, raw_hash = signer.prepare(tx)
+        if raw_hash is not None:
+            tx_hash = raw_hash.hex()
+        sent = signer.dispatch(w3, payload)
+        if raw_hash is None:
+            raw_hash = sent
+            tx_hash = raw_hash.hex() if hasattr(raw_hash, "hex") else str(raw_hash)
     except Exception as exc:
         raise SendFailed(exc, tx_hash) from exc
     print(f"  {label} sent ({tx_hash}); waiting for the receipt", flush=True)
     try:
-        return tx_hash, wait_for(w3, raw_hash)
+        return tx_hash, wait_for(w3, raw_hash, signer.receipt_timeout)
     except Exception as exc:
         raise SendFailed(exc, tx_hash) from exc
 
 
 def register_all(
-    w3, account, registry, work, runlog, fees, gas, network, action=REGISTER
+    w3, signer, registry, work, runlog, fees, gas, network, action=REGISTER
 ) -> RunResult:
-    """Register each peer in turn, logging every attempt as it resolves."""
+    """Act on each peer in turn, logging every attempt as it resolves."""
     result = RunResult()
-    nonce = read_rpc(
-        w3.eth.get_transaction_count, account.address, what="nonce read"
+    # A remote signer keeps its own nonce sequence, so we neither read nor
+    # advance one; `None` omits the field from every transaction.
+    nonce = (
+        None
+        if signer.manages_nonce
+        else read_rpc(
+            w3.eth.get_transaction_count, signer.address, what="nonce read"
+        )
     )
     consecutive_failures = 0
     total = len(work)
@@ -827,17 +956,28 @@ def register_all(
             )
         print(f"[{position}/{total}] {label}", flush=True)
 
-        # Sign before sending so the hash is known even if the send fails: it is
-        # a function of the signed payload, so it identifies the transaction
-        # whether or not the node ever answers. A signing failure is local and
-        # leaves tx_hash None, which the handlers below allow for.
-        raw = raw_hash = None
+        # A local signer knows the hash before broadcasting, so a failed send
+        # is still identifiable. A remote signer does not: the hash exists only
+        # once it has signed, so tx_hash stays None on failure and recovery is
+        # its own console. Both handlers below allow for None.
+        raw_hash = None
         tx_hash = None
+        # Whether the transaction left this process. A failure before that is
+        # local and definitely sent nothing; a transport failure after it leaves
+        # the outcome unknown, whether or not a hash is available.
+        dispatched = False
 
         try:
-            raw, raw_hash = sign_tx(account, tx)
-            tx_hash = raw_hash.hex()
-            w3.eth.send_raw_transaction(raw)
+            payload, raw_hash = signer.prepare(tx)
+            if raw_hash is not None:
+                tx_hash = raw_hash.hex()
+            dispatched = True
+            sent = signer.dispatch(w3, payload)
+            if raw_hash is None:
+                raw_hash = sent
+                tx_hash = (
+                    raw_hash.hex() if hasattr(raw_hash, "hex") else str(raw_hash)
+                )
         except KeyboardInterrupt:
             log_pending(item, tx_hash, "interrupted while sending")
             result.interrupted = True
@@ -848,7 +988,7 @@ def register_all(
             print("\n  interrupted while sending", file=sys.stderr)
             break
         except Exception as exc:
-            if tx_hash is not None and is_transport_error(exc):
+            if dispatched and is_transport_error(exc):
                 # The node may have accepted the raw transaction and failed only
                 # when replying, so the nonce may be consumed and this peer may
                 # in fact be registered. Recording `failed` here would be a
@@ -921,7 +1061,9 @@ def register_all(
                 print(f"  receipt lookup failed: {exc}", file=sys.stderr)
             break
 
-        nonce += 1
+        # Only advance a nonce we own; a remote signer keeps its own sequence.
+        if nonce is not None:
+            nonce += 1
         result.gas_used += receipt["gasUsed"]
 
         if receipt["status"] == 1:
@@ -1026,7 +1168,7 @@ def write_status_csv(path: str, rows) -> int:
 
 
 def run_state_action(
-    args, network, w3, registry, runlog, account, owner, entries, log_path
+    args, network, w3, registry, runlog, signer, owner, entries, log_path
 ):
     """Handle status, deregister and withdraw.
 
@@ -1152,7 +1294,7 @@ def run_state_action(
 
     fees = read_rpc(current_fees, w3, what="fee read")
     result = register_all(
-        w3, account, registry, work, runlog,
+        w3, signer, registry, work, runlog,
         fees=fees, gas=gas, network=network.name, action=action,
     )
 
@@ -1172,7 +1314,7 @@ def run_state_action(
     return 1 if result.failed or result.pending else 0
 
 
-def run_claim(args, network, w3, registry, runlog, account, owner):
+def run_claim(args, network, w3, registry, runlog, signer, owner):
     """Sweep every reward this wallet has earned, in one transaction.
 
     Needs no peer IDs: the distributor loops over getOwnedWorkers(msg.sender)
@@ -1226,13 +1368,15 @@ def run_claim(args, network, w3, registry, runlog, account, owner):
         return 0
 
     fees = read_rpc(current_fees, w3, what="fee read")
-    nonce = read_rpc(
-        w3.eth.get_transaction_count, owner, what="nonce read"
+    nonce = (
+        None
+        if signer.manages_nonce
+        else read_rpc(w3.eth.get_transaction_count, owner, what="nonce read")
     )
     amount = format_units(claimable, decimals)
     try:
         tx_hash, receipt = send_and_wait(
-            w3, account, treasury.build_claim(nonce, fees, gas), label="claim"
+            w3, signer, treasury.build_claim(nonce, fees, gas), label="claim"
         )
     except SendFailed as exc:
         runlog.append(
@@ -1267,11 +1411,12 @@ def main(argv: list[str] | None = None) -> int:
     log_path = args.log or default_log_path(base, network.name)
 
     if args.address:
-        if args.action != STATUS:
+        if args.action != STATUS and args.signer != FIREBLOCKS_SIGNER:
             fail(
-                f"--address only applies to --action status; --action "
-                f"{args.action} acts as whoever holds the credential. "
-                "To act on specific peer IDs use --peer-id."
+                f"--address only applies to --action status, or to "
+                f"--signer fireblocks where it selects which vault account to "
+                f"use; --action {args.action} otherwise acts as whoever holds "
+                "the credential. To act on specific peer IDs use --peer-id."
             )
         if not Web3.is_address(args.address):
             fail(
@@ -1279,20 +1424,20 @@ def main(argv: list[str] | None = None) -> int:
                 "It takes a wallet address (0x...); for a peer ID use --peer-id."
             )
 
-    # Status is read-only, so an address is enough and no key is needed.
+    w3 = connect(network, args.rpc_url)
+
+    # Status is read-only, so an address is enough and no signer is needed.
     if args.action == STATUS and args.address:
-        account = None
+        signer = None
         owner = args.address
     else:
-        account = load_signer()
-        owner = account.address
-
-    w3 = connect(network, args.rpc_url)
+        signer = build_signer(args, w3)
+        owner = signer.address
     registry = Registry(w3, network, owner)
     runlog = RunLog(log_path)
 
     if args.action == CLAIM:
-        return run_claim(args, network, w3, registry, runlog, account, owner)
+        return run_claim(args, network, w3, registry, runlog, signer, owner)
 
     try:
         if args.peer_id_file:
@@ -1315,7 +1460,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"restricted to {len(entries)} of the file's peer ID(s)")
 
     if args.action != REGISTER:
-        return run_state_action(args, network, w3, registry, runlog, account,
+        return run_state_action(args, network, w3, registry, runlog, signer,
                                 owner, entries, log_path)
 
     # Filter first, then name: numbers are handed out from the first unused
@@ -1357,7 +1502,7 @@ def main(argv: list[str] | None = None) -> int:
     gas, exact = gas_limit_for(registry, work)
     fees = read_rpc(current_fees, w3, what="fee read")
     eth = check_eth(
-        w3, account.address, gas, fees, len(work), funds.needs_approval
+        w3, owner, gas, fees, len(work), funds.needs_approval
     )
 
     print(f"bond:        {format_units(funds.bond, decimals)} SQD each")
@@ -1399,17 +1544,18 @@ def main(argv: list[str] | None = None) -> int:
     fees = read_rpc(current_fees, w3, what="fee read")
 
     if funds.needs_approval:
+        approve_nonce = (
+            None
+            if signer.manages_nonce
+            else read_rpc(w3.eth.get_transaction_count, owner, what="nonce read")
+        )
         approve_tx = registry.build_approve(
-            amount=funds.required,
-            nonce=read_rpc(
-                w3.eth.get_transaction_count, account.address, what="nonce read"
-            ),
-            fees=fees,
+            amount=funds.required, nonce=approve_nonce, fees=fees
         )
         print("approving bond transfer...")
         try:
             tx_hash, receipt = send_and_wait(
-                w3, account, approve_tx, label="approval"
+                w3, signer, approve_tx, label="approval"
             )
         except SendFailed as exc:
             named = f" {exc.tx_hash}" if exc.tx_hash else ""
@@ -1438,7 +1584,7 @@ def main(argv: list[str] | None = None) -> int:
 
     result = register_all(
         w3,
-        account,
+        signer,
         registry,
         work,
         runlog,

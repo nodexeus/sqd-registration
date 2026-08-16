@@ -26,7 +26,7 @@ def work(*names):
 
 
 def make_env(receipts, start_nonce=5):
-    """Build (w3, account, registry) whose receipts follow `receipts`.
+    """Build (w3, signer, registry) whose receipts follow `receipts`.
 
     Each entry is either a status int (1 success, 0 revert) or an exception
     instance to raise from wait_for_transaction_receipt (BaseException, so a
@@ -57,15 +57,17 @@ def make_env(receipts, start_nonce=5):
 
     registry = MagicMock()
     registry.build_register.side_effect = lambda **kwargs: {"nonce": kwargs["nonce"]}
-    return w3, account, registry
+    # The real LocalSigner, so these tests cover the actual signing path rather
+    # than a stand-in for it.
+    return w3, bulk_register.LocalSigner(account), registry
 
 
 def test_all_successes_are_logged(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([1, 1])
+    w3, signer, registry = make_env([1, 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.registered, result.failed, result.pending) == (2, 0, 0)
@@ -76,10 +78,10 @@ def test_all_successes_are_logged(tmp_path):
 
 def test_the_resolved_name_is_logged(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([1])
+    w3, signer, registry = make_env([1])
 
     bulk_register.register_all(
-        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert log.records()[0].name == "worker-a"
@@ -87,10 +89,10 @@ def test_the_resolved_name_is_logged(tmp_path):
 
 def test_metadata_is_passed_to_the_builder(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([1])
+    w3, signer, registry = make_env([1])
 
     bulk_register.register_all(
-        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert registry.build_register.call_args.kwargs["metadata"] == '{"name":"a"}'
@@ -98,10 +100,10 @@ def test_metadata_is_passed_to_the_builder(tmp_path):
 
 def test_nonces_increment_by_one_per_transaction(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([1, 1, 1], start_nonce=7)
+    w3, signer, registry = make_env([1, 1, 1], start_nonce=7)
 
     bulk_register.register_all(
-        w3, account, registry, work("a", "b", "c"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a", "b", "c"), log, FEES, gas=300000, network="mainnet"
     )
 
     nonces = [c.kwargs["nonce"] for c in registry.build_register.call_args_list]
@@ -110,10 +112,10 @@ def test_nonces_increment_by_one_per_transaction(tmp_path):
 
 def test_a_revert_is_logged_and_the_run_continues(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([0, 1])
+    w3, signer, registry = make_env([0, 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.registered, result.failed) == (1, 1)
@@ -134,7 +136,7 @@ def test_a_send_failure_mid_run_frees_the_nonce_for_the_next_attempt(tmp_path):
     transaction in the run, and the rest of the suite would still pass.
     """
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([1, 1], start_nonce=5)
+    w3, signer, registry = make_env([1, 1], start_nonce=5)
     w3.eth.send_raw_transaction.side_effect = [
         ValueError("boom"),
         MagicMock(hex=lambda: "0x01"),
@@ -142,7 +144,7 @@ def test_a_send_failure_mid_run_frees_the_nonce_for_the_next_attempt(tmp_path):
     ]
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b", "c"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a", "b", "c"), log, FEES, gas=300000, network="mainnet"
     )
 
     nonces = [c.kwargs["nonce"] for c in registry.build_register.call_args_list]
@@ -161,10 +163,10 @@ def test_a_non_timeout_receipt_error_records_pending_and_aborts(tmp_path):
     `pending` with that hash and stop the run.
     """
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([ConnectionError("connection reset"), 1])
+    w3, signer, registry = make_env([ConnectionError("connection reset"), 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.pending, result.registered) == (1, 0)
@@ -177,10 +179,10 @@ def test_a_non_timeout_receipt_error_records_pending_and_aborts(tmp_path):
 
 def test_three_consecutive_failures_abort(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([0, 0, 0, 1])
+    w3, signer, registry = make_env([0, 0, 0, 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b", "c", "d"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a", "b", "c", "d"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.registered, result.failed) == (0, 3)
@@ -190,10 +192,10 @@ def test_three_consecutive_failures_abort(tmp_path):
 
 def test_a_success_resets_the_failure_counter(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([0, 0, 1, 0, 0, 1])
+    w3, signer, registry = make_env([0, 0, 1, 0, 0, 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b", "c", "d", "e", "f"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a", "b", "c", "d", "e", "f"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.registered, result.failed) == (2, 4)
@@ -202,10 +204,10 @@ def test_a_success_resets_the_failure_counter(tmp_path):
 
 def test_receipt_timeout_records_pending_and_aborts(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([TimeExhausted("too slow"), 1])
+    w3, signer, registry = make_env([TimeExhausted("too slow"), 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.pending, result.registered) == (1, 0)
@@ -255,13 +257,13 @@ def test_an_html_error_body_behind_http_200_is_treated_as_unknown():
 
 def test_an_undecodable_reply_records_pending_with_the_hash_and_aborts(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([1, 1])
+    w3, signer, registry = make_env([1, 1])
     w3.eth.send_raw_transaction.side_effect = json.JSONDecodeError(
         "Expecting value", "<html>502</html>", 0
     )
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.pending, result.registered, result.failed) == (1, 0, 0)
@@ -274,21 +276,21 @@ def test_an_undecodable_reply_records_pending_with_the_hash_and_aborts(tmp_path)
 
 
 def test_send_and_wait_reports_the_hash_when_the_send_fails():
-    w3, account, _ = make_env([])
+    w3, signer, _ = make_env([])
     w3.eth.send_raw_transaction.side_effect = ConnectionError("reset")
 
     with pytest.raises(bulk_register.SendFailed) as exc:
-        bulk_register.send_and_wait(w3, account, {"nonce": 1}, label="approval")
+        bulk_register.send_and_wait(w3, signer, {"nonce": 1}, label="approval")
 
     assert exc.value.tx_hash == "0x00"
     assert "reset" in str(exc.value)
 
 
 def test_send_and_wait_reports_the_hash_when_the_receipt_fails(capsys):
-    w3, account, _ = make_env([TimeExhausted("too slow")])
+    w3, signer, _ = make_env([TimeExhausted("too slow")])
 
     with pytest.raises(bulk_register.SendFailed) as exc:
-        bulk_register.send_and_wait(w3, account, {"nonce": 1}, label="approval")
+        bulk_register.send_and_wait(w3, signer, {"nonce": 1}, label="approval")
 
     assert exc.value.tx_hash == "0x00"
     # The hash is printed as soon as it is broadcast, so even a Ctrl-C during
@@ -299,11 +301,11 @@ def test_send_and_wait_reports_the_hash_when_the_receipt_fails(capsys):
 def test_a_rejected_send_keeps_the_hash_but_stays_failed(tmp_path):
     """A JSON-RPC rejection is a real failure, but must still be traceable."""
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([1])
+    w3, signer, registry = make_env([1])
     w3.eth.send_raw_transaction.side_effect = ValueError("nonce too low")
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert result.failed == 1
@@ -314,11 +316,11 @@ def test_a_rejected_send_keeps_the_hash_but_stays_failed(tmp_path):
 def test_a_signing_failure_is_failed_with_no_hash(tmp_path):
     """Signing never reaches the node, so the nonce stays free and it is failed."""
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([1, 1])
-    account.sign_transaction.side_effect = ValueError("bad transaction fields")
+    w3, signer, registry = make_env([1, 1])
+    signer.account.sign_transaction.side_effect = ValueError("bad transaction fields")
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.failed, result.pending) == (1, 0)
@@ -336,11 +338,11 @@ def test_a_transport_level_send_failure_is_pending_not_failed(tmp_path):
     registration, which is the one thing the log exists to prevent.
     """
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([1, 1])
+    w3, signer, registry = make_env([1, 1])
     w3.eth.send_raw_transaction.side_effect = ConnectionError("connection reset")
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert (result.pending, result.failed, result.registered) == (1, 0, 0)
@@ -355,10 +357,10 @@ def test_a_transport_level_send_failure_is_pending_not_failed(tmp_path):
 def test_a_pending_record_persists_the_reason(tmp_path):
     """`pending` is the hardest state to diagnose, so it must carry the why."""
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([TimeExhausted("too slow")])
+    w3, signer, registry = make_env([TimeExhausted("too slow")])
 
     bulk_register.register_all(
-        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert "too slow" in log.records()[0].error
@@ -366,10 +368,10 @@ def test_a_pending_record_persists_the_reason(tmp_path):
 
 def test_a_non_timeout_pending_record_persists_the_reason(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([ConnectionError("rpc 502")])
+    w3, signer, registry = make_env([ConnectionError("rpc 502")])
 
     bulk_register.register_all(
-        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert "rpc 502" in log.records()[0].error
@@ -378,10 +380,10 @@ def test_a_non_timeout_pending_record_persists_the_reason(tmp_path):
 def test_ctrl_c_during_the_receipt_wait_keeps_the_hash(tmp_path):
     """Ctrl-C must not lose the hash of a broadcast, unresolved transaction."""
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([KeyboardInterrupt(), 1])
+    w3, signer, registry = make_env([KeyboardInterrupt(), 1])
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a", "b"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert result.interrupted is True
@@ -395,11 +397,11 @@ def test_ctrl_c_during_the_receipt_wait_keeps_the_hash(tmp_path):
 
 def test_ctrl_c_during_the_send_keeps_the_hash(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([1])
+    w3, signer, registry = make_env([1])
     w3.eth.send_raw_transaction.side_effect = KeyboardInterrupt()
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert result.interrupted is True
@@ -416,13 +418,13 @@ def test_fees_are_refreshed_during_a_long_run(tmp_path, monkeypatch):
     """
     interval = bulk_register.FEE_REFRESH_INTERVAL
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([1] * (interval + 1))
+    w3, signer, registry = make_env([1] * (interval + 1))
     refreshed = {"maxFeePerGas": 999, "maxPriorityFeePerGas": 99}
     monkeypatch.setattr(bulk_register, "current_fees", lambda _w3: refreshed)
 
     bulk_register.register_all(
         w3,
-        account,
+        signer,
         registry,
         work(*[f"p{i}" for i in range(interval + 1)]),
         log,
@@ -439,11 +441,11 @@ def test_fees_are_refreshed_during_a_long_run(tmp_path, monkeypatch):
 
 def test_send_failure_is_logged_as_failed(tmp_path):
     log = RunLog(tmp_path / "run.jsonl")
-    w3, account, registry = make_env([1])
+    w3, signer, registry = make_env([1])
     w3.eth.send_raw_transaction.side_effect = ValueError("nonce too low")
 
     result = bulk_register.register_all(
-        w3, account, registry, work("a"), log, FEES, gas=300000, network="mainnet"
+        w3, signer, registry, work("a"), log, FEES, gas=300000, network="mainnet"
     )
 
     assert result.failed == 1
