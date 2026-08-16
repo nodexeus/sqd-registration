@@ -57,5 +57,12 @@ if [[ ! -x "$proxy" ]]; then
   exit 2
 fi
 
+# Only add --signer if the caller did not; passing it twice is harmless to
+# argparse but reads like a bug in the echoed command line.
+signer_args=(--signer fireblocks)
+for arg in "$@"; do
+  [[ "$arg" == "--signer" || "$arg" == --signer=* ]] && signer_args=()
+done
+
 exec "$proxy" --chainId "$chain_id" -- \
-  "$py" "$here/bulk_register.py" --signer fireblocks "$@"
+  "$py" "$here/bulk_register.py" "${signer_args[@]}" "$@"

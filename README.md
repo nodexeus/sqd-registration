@@ -396,6 +396,19 @@ Only the account that registered a worker can deregister or withdraw it. A peer
 ID someone else registered shows as `foreign` and is skipped rather than
 attempted.
 
+That applies to `register` too, and is subtler than it looks. `withdraw()` leaves
+`workerIds[peerId]` pointing at the vacated slot, so a peer ID another account
+registered and later withdrew *looks* free — but `register()` requires
+`ownedWorkers[msg.sender]` to contain that worker and reverts with "Worker
+already registered by different account". Such peer IDs are reported separately
+and skipped:
+
+    skipped:     0 logged, 6 on-chain, 1 owned by another account
+    to register: 1
+
+A slot **this** account vacated is still offered, which is the case the two-read
+check exists for.
+
 ### `--action status`
 
 Read-only, and the only action that needs no credential — pass `--address` and

@@ -76,6 +76,7 @@ from sqdreg.networks import NETWORKS
 from sqdreg.peerids import PeerIdError, parse_file, parse_peer_ids
 from sqdreg.registry import (
     ACTIVE,
+    REGISTERED,
     FALLBACK_REGISTER_GAS,
     Treasury,
     REGISTERING,
@@ -572,25 +573,34 @@ def select_work(entries, runlog, registry, limit, network):
     """
     already_done = runlog.succeeded_peer_ids(network)
     skipped_logged = [e.peer_id for e in entries if e.peer_id in already_done]
+    # Fetched once. Needed to tell a slot this account vacated (re-registerable)
+    # from one somebody else vacated (register() would revert).
+    owned = read_rpc(registry.owned_worker_ids, what="owned workers read")
 
     work = []
     skipped_onchain: list[str] = []
+    skipped_foreign: list[str] = []
 
     for entry in entries:
         if entry.peer_id in already_done:
             continue
-        if read_rpc(
-            registry.is_registered,
+        state = read_rpc(
+            registry.registration_state,
             entry.peer_bytes,
+            owned,
             what=f"registration lookup for {entry.peer_id}",
-        ):
+        )
+        if state == REGISTERED:
             skipped_onchain.append(entry.peer_id)
+            continue
+        if state == FOREIGN:
+            skipped_foreign.append(entry.peer_id)
             continue
         work.append(entry)
         if limit is not None and len(work) >= limit:
             break
 
-    return work, skipped_logged, skipped_onchain
+    return work, skipped_logged, skipped_onchain, skipped_foreign
 
 
 @dataclass
@@ -1528,7 +1538,7 @@ def main(argv: list[str] | None = None) -> int:
     # Filter first, then name: numbers are handed out from the first unused
     # value, so naming peers that are about to be skipped would burn them.
     try:
-        selected, skipped_logged, skipped_onchain = select_work(
+        selected, skipped_logged, skipped_onchain, skipped_foreign = select_work(
             entries, runlog, registry, args.limit, network.name
         )
         # Names already claimed on this network, plus every explicit name in the
@@ -1552,7 +1562,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"log:         {log_path}")
     label = "in file" if args.peer_id_file else "peer IDs"
     print(f"{label + ':':<12} {len(entries)}")
-    print(f"skipped:     {len(skipped_logged)} logged, {len(skipped_onchain)} on-chain")
+    skipped_note = f"{len(skipped_logged)} logged, {len(skipped_onchain)} on-chain"
+    if skipped_foreign:
+        skipped_note += f", {len(skipped_foreign)} owned by another account"
+    print(f"skipped:     {skipped_note}")
     print(f"to register: {len(work)}")
 
     if not work:
@@ -1666,6 +1679,7 @@ def main(argv: list[str] | None = None) -> int:
         len(entries)
         - len(skipped_logged)
         - len(skipped_onchain)
+        - len(skipped_foreign)
         - result.registered
     )
     # select_work stops scanning once --limit is met, so under a limit the peers

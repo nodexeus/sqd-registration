@@ -32,6 +32,8 @@ FALLBACK_WITHDRAW_GAS = 200_000
 
 # A worker's position in its lifecycle, derived from on-chain state.
 UNREGISTERED = "unregistered"
+# Registered and live, so not a registration candidate.
+REGISTERED = "registered"
 # Registered, but register() sets registeredAt = nextEpoch(), so the worker is
 # not live until that boundary arrives and cannot be deregistered before then.
 REGISTERING = "registering"
@@ -312,6 +314,30 @@ class Registry:
             state=state,
             unlock_block=unlock,
         )
+
+    def registration_state(self, peer_bytes: bytes, owned: set[int]) -> str:
+        """Whether this account could register this peer ID right now.
+
+        Returns UNREGISTERED (it could), REGISTERED (a live worker holds it), or
+        FOREIGN (the slot exists but belongs to another account).
+
+        The FOREIGN case is why `is_registered` is not enough on its own.
+        withdraw() leaves `workerIds[peerId]` pointing at a vacated slot, so a
+        peer ID somebody else registered and withdrew looks free — but
+        register() requires `ownedWorkers[msg.sender]` to contain that worker,
+        and reverts with "Worker already registered by different account". Left
+        unchecked that costs a reverted transaction, and inflates the bond the
+        funds check asks for.
+
+        Same two reads as `is_registered`; `owned` is fetched once per run.
+        """
+        worker_id = self.contract.functions.workerIds(peer_bytes).call()
+        if worker_id == 0:
+            return UNREGISTERED
+        worker = self.contract.functions.getWorker(worker_id).call()
+        if worker[_REGISTERED_AT_INDEX] != 0:
+            return REGISTERED
+        return UNREGISTERED if worker_id in owned else FOREIGN
 
     def bond_amount(self) -> int:
         return self.contract.functions.bondAmount().call()

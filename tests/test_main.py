@@ -37,7 +37,8 @@ def wired(monkeypatch):
     registry.sqd_balance.return_value = BOND * 1000
     registry.allowance.return_value = BOND * 1000
     registry.token_decimals.return_value = 18
-    registry.is_registered.return_value = False
+    registry.registration_state.return_value = "unregistered"
+    registry.owned_worker_ids.return_value = set()
     registry.estimate_register_gas.return_value = (300000, True)
 
     monkeypatch.setattr(bulk_register, "load_signer", lambda: account)
@@ -323,7 +324,7 @@ def test_malformed_input_exits_before_any_transaction(wired, tmp_path):
 
 def test_nothing_to_do_exits_cleanly(wired, tmp_path, capsys):
     _, w3, registry = wired
-    registry.is_registered.return_value = True
+    registry.registration_state.return_value = "registered"
     path = make_peer_file(tmp_path, 2)
 
     code = bulk_register.main([str(path), "--yes", "--log", str(tmp_path / "l.jsonl")])
