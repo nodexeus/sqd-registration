@@ -32,9 +32,31 @@ def main(argv=None):
     parser.add_argument(
         "--prefix", default="peers", help="filename prefix (default: peers)"
     )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="PEER_ID",
+        help=(
+            "leave this peer ID out; repeat for several. Use for workers "
+            "already migrated, which would otherwise be deregistered again"
+        ),
+    )
     args = parser.parse_args(argv)
 
     rows = list(csv.DictReader(open(args.owners_csv)))
+
+    excluded = set(args.exclude)
+    missing = excluded - {r["peer_id"] for r in rows}
+    if missing:
+        sys.exit(
+            "error: --exclude peer ID not present in "
+            f"{args.owners_csv}: {', '.join(sorted(missing))}"
+        )
+    if excluded:
+        rows = [r for r in rows if r["peer_id"] not in excluded]
+        print(f"excluding {len(excluded)} peer ID(s)\n")
+
     groups = collections.defaultdict(list)
     for row in rows:
         groups[(row["owner_kind"], row["creator"], row["controller"])].append(
