@@ -15,6 +15,7 @@ __pycache__/
 *.deregistered.csv
 *.withdrawn.csv
 tethys_peer_id.txt
+fireblocks-tethys.txt
 node_modules/
 package-lock.json
 package.json
