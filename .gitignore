@@ -25,3 +25,4 @@ fireblocks.env
 fireblocks_secret.key
 owners.csv
 batches/
+.DS_Store
