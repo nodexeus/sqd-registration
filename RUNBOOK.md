@@ -6,37 +6,37 @@ Read `SETUP.md` first. Every command below is run from this directory.
 
 ---
 
-## What is being done, and why it takes a month
+## What is being done, and why it takes two weeks
 
 A worker's bond belongs to whichever account registered it, and that cannot be
 transferred. Moving a bond therefore means **registering a replacement worker
 and releasing the old one** — two separate lifecycles, not one move.
 
-Releasing a bond is the slow part, and the delay is the protocol's, not the
-tool's:
+Only one step is slow, and the delay is the protocol's rather than the tool's:
 
-| Step | Delay |
+| Step | When it takes effect |
 | --- | --- |
-| `deregister` takes effect at the next epoch | up to ~14 days |
-| the bond then stays locked | a further ~14 days |
-| `withdraw` releases it | immediate, once unlocked |
+| `deregister` | the next epoch — about **20 minutes** |
+| the bond then stays locked | **~13.9 days** |
+| `withdraw` | immediately, once unlocked |
 
-So **14 to 28 days** between deregistering a worker and recovering its 100,000
-SQD, depending where in the epoch it lands. Nothing can shorten it.
+So the worker stops earning within the hour, and its 100,000 SQD becomes
+recoverable about **two weeks** later. Nothing can shorten the lock.
 
-The four phases below are ordered so nothing waits unnecessarily.
-
----
+Two similarly named on-chain values are easy to confuse, and only one of them
+is the fortnight: epochs are 100 blocks (~20 minutes), while the lock period is
+99,999 blocks (~13.9 days).
 
 ## Before you start
 
-**Rewards should be claimed first.** They accrue to whoever owns the workers,
-and claiming is quick and independent. See phase 1.
+**The order matters, and it is deregister, claim, register.** Deregistering
+first frees each host so its replacement key can be deployed; claiming after
+that captures every reward the old worker ever earned; registering last puts the
+replacements live.
 
-**The 999 replacements can be registered at any time** — they need no
-coordination with the old workers. That does mean both sets are bonded at once,
-so the new account needs its own 99,900,000 SQD while the old bonds are still
-locked.
+**Both sets are bonded at once.** The old bonds stay locked for ~14 days after
+deregistration, so the new account needs its own 99,900,000 SQD during that
+window — the old SQD is not available to fund the new registrations.
 
 **Each file has exactly one signing account.** The tool reads the chain and
 tells you which before asking for a credential. If you give it the wrong one it
@@ -67,10 +67,48 @@ as the contract's owner, shown above.
 
 ---
 
-## Phase 1 — Claim rewards
+## Phase 1 — Deregister the old workers
 
-Independent of everything else, and worth doing first: rewards keep accruing
-and are claimed per account, not per worker, so each is a single transaction.
+Eleven runs, one per file, in any order. Each takes one transaction per worker.
+
+Look first:
+
+    ./sqd batches/peers-03-eoa-cd65B8Be-20.txt --action deregister --dry-run
+
+It reports which account must sign, how many workers are actionable, and the
+gas. Nothing is sent.
+
+Then run it without `--dry-run`. You will be asked for that account's
+credential, then to confirm.
+
+**Start with `peers-03` (20 workers).** It is small enough to check afterwards
+and simple enough that a problem is unambiguous. Then work down the list.
+
+After each run:
+
+    ./sqd batches/peers-03-eoa-cd65B8Be-20.txt --action status --address <that account>
+
+Every worker in the file should read `deregistering`. That means the call
+landed; the worker keeps running until the epoch ends.
+
+**Note the date.** The bond unlocks about 13.9 days from the epoch the
+deregistration landed in, and `--action status` will tell you exactly when.
+
+This is done first because the node hosts are reused: the replacement worker's
+key cannot be deployed to a host until the old identity has been released.
+
+---
+
+## Phase 2 — Claim rewards
+
+Done **after** deregistering, not before. A deregistered worker stops earning
+at the next epoch, so claiming afterwards captures everything it ever earned in
+one go. Claiming first would leave a final slice of rewards accruing between the
+claim and the deregistration — not lost, but easily forgotten once the migration
+has moved on.
+
+Rewards are claimed per account rather than per worker, so each account is a
+single transaction regardless of how many workers it holds.
 
 `claim` needs no peer ID file at all — it sweeps every worker the account owns
 in one transaction. Check what is owed with a dry run, which sends nothing:
@@ -95,10 +133,13 @@ the contract loops over every worker it owns — but well within limits.
 
 ---
 
-## Phase 2 — Register the replacements
+## Phase 3 — Register the replacements
 
 Needs: the new peer IDs, and the new account funded with 100,000 SQD per node
 plus ETH for gas.
+
+Done after deregistration because the node hosts are reused — a replacement key
+cannot go onto a host still running the old identity.
 
 Check the plan first. This sends nothing:
 
@@ -120,7 +161,7 @@ Then the rest:
 Each run skips what is already done, so this staging costs nothing but time.
 
 **A newly registered worker shows as `registering` until the next epoch
-begins** — up to ~14 days. It is not earning yet and the run has not failed.
+begins** — about 20 minutes. It is not earning yet and the run has not failed.
 `--action status` says so explicitly.
 
 ### Naming
@@ -134,38 +175,13 @@ only and no website or description:
 
 ---
 
-## Phase 3 — Deregister the old workers
+## Phase 4 — Withdraw, about two weeks later
 
-Eleven runs, one per file, in any order. Each takes one transaction per worker.
+This releases 100,000 SQD per worker back to the account that registered it —
+99,900,000 SQD in total across the eleven files.
 
-Look first:
-
-    ./sqd batches/peers-03-eoa-cd65B8Be-20.txt --action deregister --dry-run
-
-It reports which account must sign, how many workers are actionable, and the
-gas. Nothing is sent.
-
-Then run it without `--dry-run`. You will be asked for that account's
-credential, then to confirm.
-
-**Start with `peers-03` (20 workers).** It is small enough to check afterwards
-and simple enough that a problem is unambiguous. Then work down the list.
-
-After each run:
-
-    ./sqd batches/peers-03-eoa-cd65B8Be-20.txt --action status --address <that account>
-
-Every worker in the file should read `deregistering`. That means the call
-landed; the worker keeps running until the epoch ends.
-
-**Note the date.** Withdrawal cannot happen for 14–28 days from here, and the
-tool will tell you exactly when.
-
----
-
-## Phase 4 — Withdraw, 14 to 28 days later
-
-This releases 100,000 SQD per worker back to the account that registered it.
+The wait is ~13.9 days from the epoch in which each deregistration landed, so
+files deregistered on the same day unlock on the same day.
 
 Check readiness at any time — read-only, no credential:
 
@@ -215,8 +231,9 @@ re-run safe, and the CSV is the record of what was done.
 
 At the end you should have, per phase:
 
-- `*.registered.csv` — peer ID, name, transaction hash and block for each new worker
-- `*.deregistered.csv` and `*.withdrawn.csv` — the same for the old ones
+- `*.deregistered.csv` — peer ID, transaction hash and block for each old worker
+- `*.registered.csv` — the same for each replacement, plus its name
+- `*.withdrawn.csv` — the same, once the bonds come back
 - the `.run.jsonl` logs
 
 Those are the audit trail. Every transaction hash in them can be pasted into

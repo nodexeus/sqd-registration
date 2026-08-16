@@ -296,7 +296,10 @@ class Registry:
         else:
             unlock = deregistered_at + lock_period
             if is_active:
-                # deregister() takes effect at the next epoch boundary.
+                # deregister() takes effect at the next epoch boundary,
+                # which is workerEpochLength away -- 100 blocks, about 20
+                # minutes on mainnet. Not to be confused with lockPeriod,
+                # which is ~13.9 days and governs the bond release.
                 state = DEREGISTERING
             elif l1_block < unlock:
                 state = LOCKED

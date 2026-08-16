@@ -458,9 +458,21 @@ A freshly registered worker does not go live immediately: `register()` sets
 arrives — the SQD dashboard calls the same gap "REGISTERING". It cannot be
 deregistered until then, because the contract requires the worker to be active.
 
+Epochs are short. Two similarly named values are easy to confuse:
+
+| Value | Mainnet | Governs |
+| --- | --- | --- |
+| `workerEpochLength` | 100 blocks (~20 min) | when `nextEpoch()` falls, so when registering and deregistering take effect |
+| `epochLength`, returned by `lockPeriod()` | 99,999 blocks (~13.9 days) | how long a bond stays locked after deregistration |
+
+So registering or deregistering lands within about twenty minutes; only the
+release of the bond takes ~14 days.
+
 This is the mode to run during the wait. `deregister` takes effect at the next
 epoch and the bond then stays locked for `lockPeriod`, both **99,999 L1 blocks
-(~13.9 days)** on mainnet, so deregister → withdraw spans roughly 14–28 days.
+(~13.9 days)** on mainnet, so a bond becomes withdrawable about 14 days after
+it is deregistered. Deregistration itself takes effect at the next epoch, which
+is only ~20 minutes away.
 
 > **On timing:** the lock is measured in the block number the *contract* sees,
 > which on Arbitrum is the **L1** block number, not the L2 one `eth_blockNumber`
