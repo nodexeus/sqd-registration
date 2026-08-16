@@ -530,19 +530,37 @@ the beneficiary cannot call them directly — verified against mainnet:
     beneficiary -> vesting.execute(deregister)      accepted
     anyone else -> vesting.execute(deregister)      rejected: Not allowed to execute
 
-`--via-vesting` routes every call through the contract's `execute()`:
+**For `deregister` and `withdraw` this is worked out automatically.** The
+workers name their own creator, so no flag is needed:
 
-    ./sqd peer_ids.txt --action deregister \
-        --via-vesting 0xB35728D533Ea887862b9Ed00cfe2B7F3D36A4e71
+    ./sqd peer_ids.txt --action deregister
 
-The run must be signed by that contract's `owner()`; the tool reads it up front
-and refuses rather than letting the transaction revert. All reads — worker
+    held by:     0xB35728D533Ea887862b9Ed00cfe2B7F3D36A4e71 (a vesting contract)
+    must be signed by its owner: 0xA205c6e35e0814B0A602b016B539E819807f27F3
+
+or, for a wallet-held file:
+
+    registered by: 0x5CF5A099A9089b31689B16cd83d06b6ce154c41b
+
+The chain is read **before** a credential is asked for, so the account needed is
+named up front. If the credential supplied is the wrong one the run stops
+immediately rather than reverting a transaction.
+
+`--via-vesting` remains for the case detection cannot cover — registering *new*
+workers into a holding contract, where no worker exists yet to read a creator
+from:
+
+    ./sqd peer_ids.txt --via-vesting 0xB35728D533Ea887862b9Ed00cfe2B7F3D36A4e71
+
+Either way the run must be signed by the contract's `owner()`, which is read and
+checked before anything is sent. All reads — worker
 state, bond, balance, allowance, rewards — are then about the contract, since it
 is the account that owns the workers and holds the SQD.
 
-One peer ID file may span several holding contracts. Run once per contract with
-`--peer-id`, or split the file, because a single `--via-vesting` applies to the
-whole run.
+One peer ID file may span several creators. Split the file so each holds
+workers from one creator, and each becomes a single command with no flags. A
+contract that is not a recognised vesting contract — a Safe, say — stops the run
+rather than being guessed at.
 
 Registration through a holding contract needs **no separate approval**:
 `execute(to, data, requiredApprove)` approves exactly the bond immediately

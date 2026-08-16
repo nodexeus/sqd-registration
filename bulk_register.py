@@ -1537,6 +1537,78 @@ def run_claim(args, network, w3, registry, runlog, signer, owner, calls):
     return 0
 
 
+def detect_signing_context(w3, network, entries):
+    """Work out who must sign, from the workers themselves.
+
+    Reads creators until it finds a registered worker, then classifies that
+    creator. Returns (creator, kind, controller) where controller is the
+    account that must sign: the creator itself for a wallet, or the holding
+    contract's owner() for a vesting contract.
+
+    Returns None when nothing in the file is registered, which is not an error
+    here — the caller reports "nothing to do" rather than guessing.
+    """
+    from tools.owners import classify_owner
+
+    probe = Registry(w3, network, "0x" + "0" * 40)
+    for entry in entries:
+        worker_id = read_rpc(
+            probe.contract.functions.workerIds(entry.peer_bytes).call,
+            what=f"creator lookup for {entry.peer_id}",
+        )
+        if worker_id == 0:
+            continue
+        creator = read_rpc(
+            probe.contract.functions.getWorker(worker_id).call,
+            what=f"worker read for {entry.peer_id}",
+        )[0]
+        if int(creator, 16) == 0:
+            continue  # withdrawn: the creator is zeroed
+        kind, controller = classify_owner(w3, creator)
+        return creator, kind, controller
+    return None
+
+
+def signing_context(args, network, w3, entries):
+    """Decide the acting account and how calls reach it.
+
+    For deregister and withdraw the answer is already on chain: the workers
+    name their creator. Detecting it means the operator runs one command per
+    file rather than looking each contract up by hand, and it lets the required
+    signer be stated before a credential is asked for.
+
+    Returns (calls, acting, required_signer).
+    """
+    if args.via_vesting:
+        calls = VestingCalls(w3, network, args.via_vesting, None)
+        controller = read_rpc(calls.controller, what="vesting owner() read")
+        return calls, calls.address, controller
+
+    if args.action not in (DEREGISTER, WITHDRAW):
+        return None, None, None  # nothing registered yet to learn from
+
+    detected = detect_signing_context(w3, network, entries)
+    if detected is None:
+        return None, None, None
+    creator, kind, controller = detected
+
+    if kind == "vesting":
+        print(f"held by:     {creator} (a vesting contract)")
+        print(f"must be signed by its owner: {controller}")
+        return VestingCalls(w3, network, creator, None), creator, controller
+    if kind == "contract":
+        fail(
+            f"these workers were registered by {creator}, which is a contract "
+            "but not a recognised\n"
+            "       vesting contract. Whatever mechanism it provides has to "
+            "drive the call; this tool\n"
+            "       cannot infer it. Use --via-vesting if it exposes a "
+            "compatible execute()."
+        )
+    print(f"registered by: {creator}")
+    return None, creator, creator
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     network = NETWORKS[args.network]
@@ -1564,6 +1636,30 @@ def main(argv: list[str] | None = None) -> int:
 
     w3 = connect(network, resolve_rpc_url(args, network))
 
+    # The file is read before any credential is asked for: for deregister and
+    # withdraw the workers themselves say who must sign, so the operator can be
+    # told which account is needed rather than guessing and hitting a revert.
+    entries, duplicates = [], []
+    if args.action != CLAIM:
+        try:
+            if args.peer_id_file:
+                entries, duplicates = parse_file(args.peer_id_file)
+            else:
+                entries, duplicates = parse_peer_ids(args.peer_ids)
+        except PeerIdError as exc:
+            fail(str(exc))
+        except OSError as exc:
+            fail(f"cannot read {args.peer_id_file}: {exc}")
+
+        for warning in duplicates:
+            print(f"warning: {warning}", file=sys.stderr)
+
+        if args.peer_ids and args.peer_id_file:
+            entries = restrict_to(entries, args.peer_ids)
+            print(f"restricted to {len(entries)} of the file's peer ID(s)")
+
+    calls, acting, required = signing_context(args, network, w3, entries)
+
     # Status is read-only, so an address is enough and no signer is needed.
     if args.action == STATUS and args.address:
         signer = None
@@ -1571,24 +1667,19 @@ def main(argv: list[str] | None = None) -> int:
     else:
         signer = build_signer(args, w3)
         owner = signer.address
-    # With --via-vesting the holding contract is the account the registry sees:
-    # it owns the workers and holds the bond, while `owner` merely signs. Every
-    # read must therefore be about the contract, not the signer.
-    if args.via_vesting:
-        calls = VestingCalls(w3, network, args.via_vesting, owner)
-        acting = calls.address
-        controller = read_rpc(calls.controller, what="vesting owner() read")
-        if controller.lower() != owner.lower():
-            fail(
-                f"{acting} only accepts execute() from {controller}, but this "
-                f"run signs as {owner}.\n"
-                "       That contract restricts execute() to its own owner(), "
-                "so the run must be signed by that account."
-            )
-        print(f"via vesting: {acting} (driven by {controller})")
-    else:
+
+    if required and required.lower() != owner.lower():
+        fail(
+            f"these workers can only be acted on by {required}, but this run "
+            f"signs as {owner}.\n"
+            "       Use that account's credential, or --peer-id to select "
+            "workers this one owns."
+        )
+    if calls is None:
         calls = DirectCalls(owner)
+    if acting is None:
         acting = owner
+    calls.signer_address = owner
 
     registry = Registry(w3, network, acting)
     runlog = RunLog(log_path)
@@ -1596,25 +1687,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == CLAIM:
         return run_claim(args, network, w3, registry, runlog, signer, acting, calls)
 
-    try:
-        if args.peer_id_file:
-            entries, duplicates = parse_file(args.peer_id_file)
-        else:
-            entries, duplicates = parse_peer_ids(args.peer_ids)
-    except PeerIdError as exc:
-        fail(str(exc))
-    except OSError as exc:
-        fail(f"cannot read {args.peer_id_file}: {exc}")
-
-    for warning in duplicates:
-        print(f"warning: {warning}", file=sys.stderr)
     if not entries:
         print(f"{base} contains no peer IDs")
         return 0
-
-    if args.peer_ids and args.peer_id_file:
-        entries = restrict_to(entries, args.peer_ids)
-        print(f"restricted to {len(entries)} of the file's peer ID(s)")
 
     if args.action != REGISTER:
         return run_state_action(args, network, w3, registry, runlog, signer,
