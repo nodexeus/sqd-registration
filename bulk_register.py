@@ -948,12 +948,28 @@ def build_signer(args, w3):
     try:
         accounts = list(w3.eth.accounts)
     except Exception as exc:
+        # Only a transport failure means nothing is listening. The proxy
+        # answers eth_accounts by enumerating the vault's asset wallets, so an
+        # error *response* is about the workspace, and repeating install
+        # instructions here sends the operator after the wrong thing.
+        if is_transport_error(exc):
+            fail(
+                f"cannot reach the signer at "
+                f"{args.rpc_url or 'the RPC endpoint'}: {exc}\n"
+                "       --signer fireblocks needs a running "
+                "fireblocks-json-rpc\n"
+                "       (npm install @fireblocks/fireblocks-json-rpc)"
+            )
         fail(
-            f"cannot list accounts from {args.rpc_url or 'the RPC endpoint'}: "
-            f"{exc}\n"
-            "       --signer fireblocks needs --rpc-url pointing at a running "
-            "fireblocks-json-rpc\n"
-            "       (npm install -g @fireblocks/fireblocks-json-rpc)"
+            f"the signer rejected eth_accounts: {exc}\n"
+            "       The proxy is running and answered, so this is a Fireblocks "
+            "workspace question.\n"
+            "       'No <ASSET> asset wallet found' means that vault account "
+            "has no wallet for this\n"
+            "       chain: add the asset in the Fireblocks console, check "
+            "FIREBLOCKS_VAULT_ACCOUNT_IDS,\n"
+            "       and check --network — ETH-AETH is Arbitrum One, "
+            "ETH-AETH_SEPOLIA is tethys."
         )
     if not accounts:
         fail(

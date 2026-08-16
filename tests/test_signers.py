@@ -340,3 +340,30 @@ def test_the_logged_hash_is_prefixed(tmp_path):
     )
 
     assert log.records()[0].tx_hash == "0xabcd"
+
+
+def test_a_workspace_error_does_not_blame_the_plumbing(capsys):
+    """The proxy answering with an error is a workspace problem, not a missing
+    proxy. Repeating install instructions there sends the operator the wrong
+    way — which it did, twice, before this was fixed."""
+    from web3.exceptions import Web3RPCError
+
+    w3 = MagicMock()
+    type(w3.eth).accounts = property(
+        lambda _self: (_ for _ in ()).throw(
+            Web3RPCError(
+                "Failed to populate accounts: No ETH-AETH asset wallet found "
+                "for vault account with id 1"
+            )
+        )
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.build_signer(args_for(), w3)
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "workspace question" in err
+    assert "FIREBLOCKS_VAULT_ACCOUNT_IDS" in err
+    assert "--network" in err          # the actual cause here
+    assert "npm install" not in err    # the proxy is clearly running
