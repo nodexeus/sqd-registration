@@ -383,3 +383,40 @@ def test_prepare_applies_the_fields_to_every_entry():
         assert parsed["description"] == "Hosted"
     # and the names are still per-entry
     assert json.loads(prepared[1].metadata)["name"] == "explicit"
+
+
+def test_the_branding_defaults_are_applied_without_any_flag():
+    import bulk_register
+    from sqdreg.naming import DEFAULT_DESCRIPTION, DEFAULT_WEBSITE
+
+    args = bulk_register.parse_args(["peers.txt"])
+
+    assert args.website == DEFAULT_WEBSITE
+    assert args.description == DEFAULT_DESCRIPTION
+
+
+def test_an_empty_string_suppresses_a_default_field():
+    import bulk_register
+
+    args = bulk_register.parse_args(
+        ["peers.txt", "--website", "", "--description", ""]
+    )
+    prepared = prepare(
+        [entry(peer_id="a")], None,
+        website=args.website, description=args.description,
+    )
+
+    assert json.loads(prepared[0].metadata).keys() == {"name"}
+
+
+def test_the_defaults_leave_room_under_the_byte_cap():
+    """Guards against a future default that cannot fit alongside a long name."""
+    from sqdreg.naming import DEFAULT_DESCRIPTION, DEFAULT_WEBSITE
+
+    longest_plausible_name = "x" * 40
+    size = len(
+        encode_metadata(
+            longest_plausible_name, DEFAULT_WEBSITE, DEFAULT_DESCRIPTION
+        ).encode()
+    )
+    assert size < MAX_METADATA_BYTES

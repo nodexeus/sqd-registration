@@ -71,7 +71,13 @@ except ImportError as _exc:  # pragma: no cover - exercised by a subprocess test
     )
     raise SystemExit(2) from None
 
-from sqdreg.naming import DEFAULT_BATCH_SIZE, NamingError, prepare
+from sqdreg.naming import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_DESCRIPTION,
+    DEFAULT_WEBSITE,
+    NamingError,
+    prepare,
+)
 from sqdreg.networks import NETWORKS
 from sqdreg.peerids import PeerIdError, parse_file, parse_peer_ids
 from sqdreg.registry import (
@@ -253,14 +259,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--website",
+        default=DEFAULT_WEBSITE,
         help=(
-            "website recorded on every worker in this run, shown by the SQD "
-            "dashboard, e.g. https://www.example.com/"
+            "website recorded on every worker, shown by the SQD dashboard "
+            f"(default: {DEFAULT_WEBSITE}). Pass an empty string to omit it"
         ),
     )
     parser.add_argument(
         "--description",
-        help="description recorded on every worker in this run",
+        default=DEFAULT_DESCRIPTION,
+        help=(
+            "description recorded on every worker "
+            f"(default: {DEFAULT_DESCRIPTION!r}). Pass an empty string to omit it"
+        ),
     )
     parser.add_argument(
         "--batch",
@@ -373,9 +384,12 @@ def resume_command(args: argparse.Namespace) -> str:
     if args.peer_ids:
         for peer_id in args.peer_ids:
             parts += ["--peer-id", shlex.quote(peer_id)]
-    if args.website:
+    # Echoed only when they differ from the default, which includes the case of
+    # being deliberately emptied: without that, a resume would silently put the
+    # default branding back on the remaining nodes.
+    if args.website != DEFAULT_WEBSITE:
         parts += ["--website", shlex.quote(args.website)]
-    if args.description:
+    if args.description != DEFAULT_DESCRIPTION:
         parts += ["--description", shlex.quote(args.description)]
     if args.log:
         parts += ["--log", shlex.quote(args.log)]

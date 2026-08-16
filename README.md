@@ -67,8 +67,8 @@ instead and tells you to set an environment variable.
 | `--network` | `mainnet` (default) or `tethys` |
 | `-n`, `--limit` | Register at most this many *new* nodes |
 | `--name-template` | Name for lines without an explicit name |
-| `--website` | Website recorded on every worker in the run |
-| `--description` | Description recorded on every worker in the run |
+| `--website` | Website on every worker (defaults to the operator's; `''` omits) |
+| `--description` | Description on every worker (defaults to the operator's; `''` omits) |
 | `--batch` | Nodes per generated-name batch (default 50) |
 | `--dry-run` | Run every check, print the plan, send nothing |
 | `--yes` | Skip the confirmation prompt |
@@ -209,23 +209,30 @@ worker later without re-bonding.
 
 ### Website and description
 
-`--website` and `--description` are recorded on **every** worker in the run,
-since they describe the operator rather than the node:
+Every worker also records a website and a description, since those describe the
+operator rather than the node. **Both are applied by default**, so no flag is
+needed:
 
-    ./sqd peer_ids.txt \
-        --website 'https://www.example.com/' \
-        --description 'Hosting provided by Example Technologies'
+    ./sqd peer_ids.txt
 
 The stored metadata becomes:
 
-    {"name":"garnet-BFJnLd","website":"https://www.example.com/","description":"..."}
+    {"name":"garnet-BFJnLd","website":"https://www.nodexeus.com/","description":"Hosting provided by Nodexeus Technologies"}
+
+The defaults live in `sqdreg/naming.py` as `DEFAULT_WEBSITE` and
+`DEFAULT_DESCRIPTION`. Override either with `--website` / `--description`, or
+pass an empty string to omit it:
+
+    ./sqd peer_ids.txt --website '' --description ''      # name only
+    ./sqd peer_ids.txt --description 'Operated by Acme'   # override just one
 
 The indexer parses this and exposes all three as worker fields, so they appear in
 the SQD dashboard. Absent values are omitted rather than written as `""`, so a
 worker with no website reads as null rather than blank.
 
-Both are echoed back in the resume hint, because a resume without them would
-register the remaining nodes with no website or description.
+They are echoed in the resume hint only when they differ from the defaults —
+including when deliberately emptied, since otherwise a resume would put the
+default branding back on every remaining node.
 
 Watch the byte cap: metadata is capped at 256 bytes and costs roughly 915 gas
 per byte. A name alone is around 24 bytes; adding a website and a description

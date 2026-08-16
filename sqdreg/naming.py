@@ -16,6 +16,13 @@ from sqdreg.peerids import PeerEntry
 
 MAX_METADATA_BYTES = 256
 
+# Applied to every registration unless overridden. These describe the operator
+# running the tool rather than any individual node, so they belong here as
+# defaults rather than being retyped per run. Override with --website /
+# --description, or pass an empty string to omit either.
+DEFAULT_WEBSITE = "https://www.nodexeus.com/"
+DEFAULT_DESCRIPTION = "Hosting provided by Nodexeus Technologies"
+
 
 # Default nodes per batch. Each batch gets one random word, so a 1000-node run
 # draws 20 words and produces 20 visibly distinct groups.

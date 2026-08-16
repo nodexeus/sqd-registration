@@ -609,3 +609,31 @@ def test_the_claim_gas_fallback_scales_with_the_fleet():
     assert exact_small is False
     assert large > small
     assert large > 7_000_000  # a 1000-worker sweep measured ~7.7M on mainnet
+
+
+def test_the_resume_hint_omits_unchanged_branding():
+    """Defaults are reapplied automatically, so echoing them is noise."""
+    args = bulk_register.parse_args(["peers.txt"])
+
+    hint = bulk_register.resume_command(args)
+
+    assert "--website" not in hint
+    assert "--description" not in hint
+
+
+def test_the_resume_hint_carries_suppressed_branding():
+    """The subtle case: without this, a resume would silently reapply the
+    default branding to every remaining node."""
+    args = bulk_register.parse_args(["peers.txt", "--website", ""])
+
+    hint = bulk_register.resume_command(args)
+
+    assert "--website ''" in hint
+
+
+def test_the_resume_hint_carries_overridden_branding():
+    args = bulk_register.parse_args(["peers.txt", "--description", "Something else"])
+
+    hint = bulk_register.resume_command(args)
+
+    assert "--description 'Something else'" in hint
