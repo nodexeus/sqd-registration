@@ -122,22 +122,29 @@ has moved on.
 Rewards are claimed per account rather than per worker, so each account is a
 single transaction regardless of how many workers it holds.
 
-`claim` needs no peer ID file at all — it sweeps every worker the account owns
-in one transaction. Check what is owed with a dry run, which sends nothing and
-needs no credential:
+Pass the same batch file used for deregistration. `claim` does not act on the
+peer IDs — it sweeps every worker the account owns in one transaction — but the
+file tells it whose rewards to claim, so no address or contract has to be looked
+up:
 
-    ./sqd --action claim --dry-run
+    ./sqd batches/peers-01-eoa-5CF5A099-275.txt --action claim --dry-run
 
-For rewards held by a vesting contract, name the contract:
+    registered by: 0x5CF5A099A9089b31689B16cd83d06b6ce154c41b
+    claimable:     35005.34 SQD
 
-    ./sqd --action claim --via-vesting 0xB35728D533Ea887862b9Ed00cfe2B7F3D36A4e71 --dry-run
+A vesting-held file is handled the same way, with the contract and its owner
+detected automatically:
 
-Drop `--dry-run` to claim. Expect `claimable: N SQD`, a confirmation prompt,
-then one transaction; `nothing to claim` means that account has none.
+    ./sqd batches/peers-09-vesting-51FF3579-61.txt --action claim --dry-run
 
-**Twelve runs in total** — one for each of the five wallets, and one for each of
-the seven vesting contracts. The contracts are listed as `creator` in
-`batches/MANIFEST.csv`; you sign as the matching `signer`.
+    rewards held by: 0xC99B581a…7094f (a vesting contract)
+    must be signed by its owner: 0x51FF3579…2b629
+
+Neither needs a credential. Drop `--dry-run` to claim, and you will be asked for
+the account named.
+
+**Eleven runs, one per file** — the same files as phase 1, in the same order.
+Each covers one account, and no account appears twice.
 
 As of writing, roughly **120,000 SQD** was claimable across the twelve.
 

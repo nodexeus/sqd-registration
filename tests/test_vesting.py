@@ -304,3 +304,43 @@ def test_an_explicit_via_vesting_still_wins(monkeypatch):
 
     assert isinstance(calls, VestingCalls)
     assert acting == VESTING and required == BENEFICIARY
+
+
+def test_claim_learns_the_account_from_a_peer_id_file(monkeypatch, capsys):
+    """Rewards accrue to whoever registered the workers, so the file names the
+    account just as it does for deregister — no --via-vesting, no credential."""
+    w3 = detect_env(monkeypatch, BENEFICIARY)
+    args = MagicMock(via_vesting=None, action="claim")
+
+    calls, acting, required = bulk_register.signing_context(
+        args, NETWORKS["mainnet"], w3, entries_for("a")
+    )
+
+    assert acting == BENEFICIARY and required == BENEFICIARY
+
+
+def test_claim_through_a_vesting_contract_is_detected_too(monkeypatch, capsys):
+    w3 = detect_env(
+        monkeypatch, VESTING, code=b"\x60" * 100,
+        probe_answers={"owner": BENEFICIARY, "expectedTotalAmount": 1},
+    )
+    args = MagicMock(via_vesting=None, action="claim")
+
+    calls, acting, required = bulk_register.signing_context(
+        args, NETWORKS["mainnet"], w3, entries_for("a")
+    )
+
+    assert isinstance(calls, VestingCalls)
+    assert acting == VESTING        # the rewards belong to the contract
+    assert required == BENEFICIARY  # its owner signs
+    assert "rewards held by" in capsys.readouterr().out
+
+
+def test_claim_without_a_file_still_needs_a_credential(monkeypatch):
+    """With no peer IDs there is nothing to learn the account from."""
+    w3 = detect_env(monkeypatch, BENEFICIARY)
+    args = MagicMock(via_vesting=None, action="claim")
+
+    assert bulk_register.signing_context(
+        args, NETWORKS["mainnet"], w3, []
+    ) == (None, None, None)

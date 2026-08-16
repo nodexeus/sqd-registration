@@ -1645,8 +1645,13 @@ def signing_context(args, network, w3, entries):
         controller = read_rpc(calls.controller, what="vesting owner() read")
         return calls, calls.address, controller
 
-    if args.action not in (DEREGISTER, WITHDRAW):
-        return None, None, None  # nothing registered yet to learn from
+    # Rewards accrue to whichever account registered the workers, so a peer ID
+    # file identifies the account to claim for just as it does for deregister.
+    # Registration is the exception: nothing exists yet to read a creator from.
+    if args.action not in (DEREGISTER, WITHDRAW, CLAIM):
+        return None, None, None
+    if not entries:
+        return None, None, None
 
     detected = detect_signing_context(w3, network, entries)
     if detected is None:
@@ -1654,7 +1659,8 @@ def signing_context(args, network, w3, entries):
     creator, kind, controller = detected
 
     if kind == "vesting":
-        print(f"held by:     {creator} (a vesting contract)")
+        label = "rewards held by" if args.action == CLAIM else "held by"
+        print(f"{label}: {creator} (a vesting contract)")
         print(f"must be signed by its owner: {controller}")
         return VestingCalls(w3, network, creator, None), creator, controller
     if kind == "contract":
@@ -1668,6 +1674,7 @@ def signing_context(args, network, w3, entries):
         )
     print(f"registered by: {creator}")
     return None, creator, creator
+
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1705,8 +1712,10 @@ def main(argv: list[str] | None = None) -> int:
     # The file is read before any credential is asked for: for deregister and
     # withdraw the workers themselves say who must sign, so the operator can be
     # told which account is needed rather than guessing and hitting a revert.
+    # Parsed whenever one is supplied. claim does not act on peer IDs, but a
+    # file still identifies the account whose rewards they are.
     entries, duplicates = [], []
-    if args.action != CLAIM:
+    if args.peer_id_file or args.peer_ids:
         try:
             if args.peer_id_file:
                 entries, duplicates = parse_file(args.peer_id_file)
