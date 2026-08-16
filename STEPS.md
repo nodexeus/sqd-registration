@@ -13,7 +13,7 @@ e.g. `./sqd batches/peers-03-eoa-cd65B8Be-20.txt --action claim` -> `./sqd batch
   ```
 4. Verify setup:
   ```
-  ./sqd tools/check.txt --action status
+  ./sqd check.txt --action status
   ```
 
 ## Deregister
