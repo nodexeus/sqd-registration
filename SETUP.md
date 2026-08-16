@@ -1,85 +1,124 @@
 # Setup
 
-For the operator running `bulk_register.py` against a Fireblocks-held wallet.
-One-time setup, then a single command per run.
+One-time setup for running `bulk_register.py`. Takes about ten minutes.
 
-## What you will need
+## Requirements
 
-| From your Fireblocks admin | Why |
-| --- | --- |
-| An **API user** with permission to initiate transactions | The tool authenticates as this user |
-| Its **API key** (a UUID) | Identifies the API user |
-| Its **RSA private key** file | Signs API requests. Generated when the API user is created, and never leaves your side |
-| The **vault account ID** holding the SQD and the gas | Which account to act as |
-
-Also required in that vault account:
-
-- The chain's native asset enabled — **ETH on Arbitrum One** for mainnet. Without
-  it the tool cannot see an address to act as.
-- Enough **ETH for gas**: about 0.05 ETH covers 1000 registrations with wide
-  margin.
-- Enough **SQD**: 100,000 per node. 1000 nodes is 100,000,000 SQD.
-
-> **The API key plus its RSA key is signing authority.** Combined with a policy
-> that auto-approves these calls, whoever holds them can move funds from that
-> vault. Treat them exactly as you would a private key: they belong with
-> whoever owns the wallet, not with a contractor.
-
-## Will every transaction need approving by hand?
-
-That is the one question to settle before a large run. Fireblocks checks each
-transaction against its Transaction Authorization Policy. Automated signing
-needs an **API Co-Signer** deployed, plus a TAP rule that approves these calls.
-Without both, every transaction waits for a human in the console — fine for one
-node, untenable for a thousand.
-
-Ask your Fireblocks admin to confirm before committing to a full run.
+- **Python 3.10 or newer.** The code uses annotations that Python 3.9 cannot
+  evaluate, so it fails at import there. On macOS the system `python3` is
+  usually 3.9, so invoke a newer one explicitly.
+- **Node 18 or newer** — only if any account is held in Fireblocks.
+- An RPC endpoint. The defaults are the public Arbitrum ones, which are fine at
+  this scale; `--rpc-url` overrides them.
 
 ## Install
 
-Needs **Python 3.10+** and **Node 18+**.
-
     python3.11 -m venv .venv
     .venv/bin/pip install -r requirements.txt
+
+If any account is in Fireblocks, also:
+
     npm install @fireblocks/fireblocks-json-rpc
 
-## Configure
+Check it works:
 
-Put the RSA key somewhere this directory can read, then:
+    ./sqd --help
+
+Note `./sqd`, not `python bulk_register.py`. Running the script directly picks
+the system Python and misses the virtualenv; the wrapper handles both.
+
+## Two ways to sign
+
+The tool never stores a key. Which method applies depends on where each account
+lives, and **a single job may use both** — one file signed from Fireblocks,
+another from a wallet whose key you hold.
+
+### A key you hold
+
+Nothing to configure. When a run needs a credential it asks, with the input
+hidden:
+
+    Private key or BIP-39 phrase (input hidden):
+
+Paste a private key or a 12/24-word phrase. Nothing is written to disk, and a
+malformed entry is reported without echoing what you typed.
+
+For an unattended run, set `PRIVATE_KEY` or `MNEMONIC` in the environment or a
+`.env` file instead. The prompt only appears at a terminal — under cron or CI
+the run fails immediately rather than hanging.
+
+### Fireblocks
+
+Fireblocks holds keys as MPC shares and cannot export them, so there is nothing
+to paste. Transactions go out unsigned for Fireblocks to sign.
+
+From your Fireblocks administrator:
+
+| | |
+| --- | --- |
+| An **API user** allowed to initiate transactions | The tool authenticates as this user |
+| Its **API key** (a UUID) | Identifies that user |
+| Its **RSA private key** file | Signs API requests. Generated when the API user is created |
+| The **vault account ID** | Which account to act as. The first is `0`, not `1` |
+
+The vault account also needs the chain's native asset enabled — **ETH on
+Arbitrum One** — or the tool cannot see an address to act as.
+
+Then:
 
     cp fireblocks.env.example fireblocks.env
 
-Fill in four values: the API key, the path to the RSA key, the vault account ID,
-and — for a sandbox only — the sandbox base URL. That file is gitignored.
+and fill in the four values. The presence of that file is what routes signing
+through Fireblocks; rename it to go back to prompting. It is gitignored, and so
+is `*.key`.
 
-The presence of `fireblocks.env` is what routes everything through Fireblocks.
-Nothing else has to be exported, and no proxy has to be started by hand.
+> **Those credentials are signing authority.** An API key plus its RSA key,
+> combined with a policy that approves these calls, can move funds from that
+> vault. Keep them with whoever owns the wallet.
 
-## Run
+#### Will each transaction need approving by hand?
 
-    ./sqd peer_ids.txt --action status
-    ./sqd peer_ids.txt --network tethys --dry-run
-    ./sqd peer_ids.txt --limit 1
-    ./sqd peer_ids.txt
+Settle this before a large run. Fireblocks checks every transaction against its
+Transaction Authorization Policy. Unattended signing needs an **API Co-Signer**
+deployed plus a TAP rule that approves these calls. Without both, each
+transaction waits for a person in the console — fine for one node, impossible
+for hundreds.
 
-`./sqd` starts the Fireblocks proxy, runs the command through it, and shuts it
-down again. Every argument is passed straight through, so anything in the README
-works unchanged.
+## Funding
 
-## Suggested order for a large run
+| For | What is needed |
+| --- | --- |
+| Registering | 100,000 SQD per node, in the registering account |
+| Any action | ETH on Arbitrum One for gas |
 
-1. `./sqd peer_ids.txt --action status` — reads only; confirms the wallet, the
-   file, and how many nodes are actually outstanding.
-2. `./sqd peer_ids.txt --dry-run` — the full plan, including the bond total and
-   whether an approval is needed. Sends nothing.
-3. `./sqd peer_ids.txt --limit 1` — one node, end to end. Confirm it appears in
-   the SQD dashboard before going further.
-4. `./sqd peer_ids.txt --limit 10` — ten more.
-5. `./sqd peer_ids.txt` — the rest.
+The tool checks both before sending and stops if either is short. About
+**0.05 ETH** covers 1000 registrations with wide margin; deregistering,
+withdrawing and claiming cost far less.
 
-Each run skips what is already done, so this costs nothing but time. Do steps
-1-3 on `--network tethys` first if you have testnet funds.
+Registration also needs an ERC-20 allowance, which the tool handles: it sends
+one `approve` for exactly `bond × count` and never an unlimited amount. Through
+a vesting contract even that is unnecessary — the contract approves each bond
+immediately before use.
 
-A freshly registered worker shows as `registering` until the next epoch begins,
-which on mainnet can be up to ~14 days. That is the protocol, not a failed run;
-`--action status` will say so.
+## Checking without doing anything
+
+Two read-only commands that need no credential:
+
+    ./sqd peer_ids.txt --action status --address 0xYourWallet
+    .venv/bin/python tools/owners.py peer_ids.txt --csv owners.csv
+
+The first reports where each peer ID sits in the worker lifecycle. The second
+reports which account registered each one, and whether that account is a wallet
+or a holding contract.
+
+## Reading a run
+
+Every run prints a plan and asks for confirmation before sending anything.
+`--dry-run` stops after the plan.
+
+Each run appends to `<file>.<network>.run.jsonl` and rewrites a CSV of confirmed
+results. Re-running the same command skips whatever already succeeded, so an
+interrupted run is resumed by repeating it — the tool prints the exact command.
+
+Nothing is ever double-spent: before acting on a peer ID the tool checks its
+current on-chain state, so a repeated run is safe.
