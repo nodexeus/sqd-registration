@@ -129,14 +129,11 @@ immediately before use.
 
 ## Checking without doing anything
 
-Two read-only commands that need no credential:
+A read-only command that doesn't require credentials:
 
-    ./sqd peer_ids.txt --action status --address 0xYourWallet
-    .venv/bin/python tools/owners.py peer_ids.txt --csv owners.csv
+    ./sqd check.txt --action status
 
-The first reports where each peer ID sits in the worker lifecycle. The second
-reports which account registered each one, and whether that account is a wallet
-or a holding contract.
+This reports where the peer ID sits in the worker lifecycle and verifies everything is installed. 
 
 ## Reading a run
 
