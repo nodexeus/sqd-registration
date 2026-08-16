@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# One entry point for bulk_register.py.
+#
+# If fireblocks.env exists it is loaded and the command is routed through the
+# Fireblocks JSON-RPC proxy, which is started and torn down around this run.
+# Otherwise the command runs directly and signs with a local credential.
+#
+#   ./sqd peer_ids.txt --action status
+#   ./sqd peer_ids.txt --network tethys --limit 1
+#
+# Every argument is passed straight through to bulk_register.py.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+py="$here/.venv/bin/python"
+
+if [[ ! -x "$py" ]]; then
+  echo "error: $py not found. Create the virtualenv first:" >&2
+  echo "         python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
+  exit 2
+fi
+
+# Which network, so the proxy can be told the matching chain. Read from the
+# same table bulk_register.py uses, so the two cannot drift apart.
+network=mainnet
+prev=""
+for arg in "$@"; do
+  [[ "$prev" == "--network" ]] && network="$arg"
+  prev="$arg"
+done
+
+if [[ -f "$here/fireblocks.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$here/fireblocks.env"
+  set +a
+fi
+
+if [[ -z "${FIREBLOCKS_API_KEY:-}" ]]; then
+  exec "$py" "$here/bulk_register.py" "$@"
+fi
+
+chain_id="$("$py" - "$network" <<'PYEOF'
+import sys
+from sqdreg.networks import NETWORKS
+name = sys.argv[1]
+if name not in NETWORKS:
+    sys.exit(f"error: unknown --network {name!r}")
+print(NETWORKS[name].chain_id)
+PYEOF
+)"
+
+proxy="$here/node_modules/.bin/fireblocks-json-rpc"
+if [[ ! -x "$proxy" ]]; then
+  echo "error: the Fireblocks proxy is not installed. Run:" >&2
+  echo "         npm install @fireblocks/fireblocks-json-rpc" >&2
+  exit 2
+fi
+
+exec "$proxy" --chainId "$chain_id" -- \
+  "$py" "$here/bulk_register.py" --signer fireblocks "$@"
