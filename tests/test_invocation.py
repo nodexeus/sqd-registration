@@ -86,7 +86,7 @@ def test_a_missing_dependency_points_at_the_virtualenv(tmp_path):
 WRAPPER = os.path.join(REPO, "sqd")
 
 
-def run_wrapper(tmp_path, args, api_key="stub-key"):
+def run_wrapper(tmp_path, args, api_key="stub-key", extra_env=None):
     """Run ./sqd with a stub proxy that just reports its arguments.
 
     Both the proxy and the config file are redirected into tmp_path. Nothing
@@ -105,6 +105,7 @@ def run_wrapper(tmp_path, args, api_key="stub-key"):
 
     env = dict(os.environ, SQD_PROXY=str(stub), SQD_ENV_FILE=str(env_file))
     env.pop("FIREBLOCKS_API_KEY", None)
+    env.update(extra_env or {})
     return subprocess.run(
         [WRAPPER, *args], capture_output=True, text=True, env=env, cwd=REPO
     )
@@ -187,3 +188,41 @@ def test_the_tests_never_touch_the_real_config(tmp_path):
     if before:
         with open(real, "rb") as handle:
             assert handle.read() == digest, "the real config was modified"
+
+
+def test_missing_node_is_named_rather_than_left_to_env(tmp_path):
+    """Without the guard this surfaces as "env: node: No such file or
+    directory", which names neither this tool nor the fix. Whoever reads it
+    may be forwarding it to someone else to interpret."""
+    result = run_wrapper(
+        tmp_path, ["peers.txt", "--action", "status"],
+        extra_env={"PATH": "/usr/bin:/bin"},
+    )
+
+    assert result.returncode == 2
+    assert "Node.js is not installed" in result.stderr
+    assert "--signer local" in result.stderr
+
+
+def test_node_older_than_18_is_reported_with_its_version(tmp_path):
+    fake = tmp_path / "oldnode"
+    fake.write_text(
+        '#!/bin/sh\n[ "$1" = "--version" ] && echo v16.20.2 && exit 0\necho 16\n'
+    )
+    fake.chmod(0o755)
+
+    result = run_wrapper(
+        tmp_path, ["peers.txt", "--action", "status"],
+        extra_env={"SQD_NODE": str(fake)},
+    )
+
+    assert result.returncode == 2
+    assert "Node 18 or newer is required" in result.stderr
+    assert "v16.20.2" in result.stderr
+
+
+def test_a_supported_node_is_not_flagged(tmp_path):
+    result = run_wrapper(tmp_path, ["peers.txt", "--action", "status"])
+
+    assert "Node" not in result.stderr
+    assert "PROXY_ARGS" in result.stdout

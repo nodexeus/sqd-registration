@@ -85,6 +85,24 @@ if [[ ! -x "$proxy" ]]; then
   exit 2
 fi
 
+# The proxy is a node script, so without node it dies as "env: node: No such
+# file or directory" -- true, but it names neither this tool nor the fix. Say
+# it plainly instead: whoever reads this may be forwarding it to someone else
+# to interpret.
+node_bin="${SQD_NODE:-node}"
+if ! command -v "$node_bin" >/dev/null 2>&1; then
+  echo "error: Node.js is not installed, and signing through Fireblocks needs it." >&2
+  echo "       Install Node 18 or newer from https://nodejs.org/ and try again." >&2
+  echo "       Runs that do not use Fireblocks (--signer local) do not need it." >&2
+  exit 2
+fi
+node_major="$("$node_bin" -e 'process.stdout.write(String(process.versions.node.split(".")[0]))' 2>/dev/null || echo 0)"
+if [[ ! "$node_major" =~ ^[0-9]+$ ]] || (( node_major < 18 )); then
+  echo "error: Node 18 or newer is required, but this is $("$node_bin" --version 2>&1)." >&2
+  echo "       Upgrade from https://nodejs.org/ and try again." >&2
+  exit 2
+fi
+
 # Build the command up rather than conditionally emptying an array: bash 3.2,
 # which macOS still ships, treats "${empty[@]}" as an unbound variable
 # under `set -u`.
