@@ -367,3 +367,32 @@ def test_a_workspace_error_does_not_blame_the_plumbing(capsys):
     assert "FIREBLOCKS_VAULT_ACCOUNT_IDS" in err
     assert "--network" in err          # the actual cause here
     assert "npm install" not in err    # the proxy is clearly running
+
+
+def test_a_vault_without_the_required_account_says_how_to_sign_locally(capsys):
+    """A job can span accounts in different places. Failing on the vault that
+    was never going to hold this one is unhelpful."""
+    w3 = MagicMock()
+    w3.eth.accounts = ["0x000000000000000000000000000000000000dEaD"]
+    w3.to_checksum_address.side_effect = lambda v: v
+    needed = "0xA205c6e35e0814B0A602b016B539E819807f27F3"
+
+    with pytest.raises(SystemExit) as exc:
+        bulk_register.build_signer(args_for(), w3, required=needed)
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert needed in err
+    assert "--signer local" in err
+    assert "can stay in place" in err
+
+
+def test_a_vault_holding_the_required_account_is_used():
+    needed = "0x000000000000000000000000000000000000dEaD"
+    w3 = MagicMock()
+    w3.eth.accounts = [needed]
+    w3.to_checksum_address.side_effect = lambda v: v
+
+    signer = bulk_register.build_signer(args_for(), w3, required=needed)
+
+    assert signer.address == needed

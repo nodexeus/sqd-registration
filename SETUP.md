@@ -70,8 +70,12 @@ Then:
     cp fireblocks.env.example fireblocks.env
 
 and fill in the four values. The presence of that file is what routes signing
-through Fireblocks; rename it to go back to prompting. It is gitignored, and so
-is `*.key`.
+through Fireblocks. It is gitignored, and so is `*.key`.
+
+**A job may mix the two.** Leave `fireblocks.env` in place and add
+`--signer local` to any individual run whose account is a key you hold — that
+run skips Fireblocks entirely. There is no need to create and delete the file
+between phases.
 
 > **Those credentials are signing authority.** An API key plus its RSA key,
 > combined with a policy that approves these calls, can move funds from that

@@ -38,6 +38,22 @@ if [[ -f "$env_file" ]]; then
   set +a
 fi
 
+# An explicit --signer local means this run uses a key held here, so the proxy
+# is not merely unnecessary but wrong: starting it would authenticate to a
+# workspace that has nothing to do with the account signing. A single job can
+# mix the two — one account in Fireblocks, others held directly — so this is
+# per run rather than per configuration.
+for arg in "$@"; do
+  [[ "$arg" == "--signer=local" ]] && exec "$py" "$here/bulk_register.py" "$@"
+done
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--signer" && "$arg" == "local" ]]; then
+    exec "$py" "$here/bulk_register.py" "$@"
+  fi
+  prev="$arg"
+done
+
 if [[ -z "${FIREBLOCKS_API_KEY:-}" ]]; then
   exec "$py" "$here/bulk_register.py" "$@"
 fi

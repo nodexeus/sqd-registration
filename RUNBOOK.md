@@ -42,6 +42,19 @@ window — the old SQD is not available to fund the new registrations.
 tells you which before asking for a credential. If you give it the wrong one it
 stops immediately rather than sending anything.
 
+**These accounts are not all in the same place.** The account registering the
+replacements is in Fireblocks; the nine that hold the existing workers may not
+be. Leave `fireblocks.env` in place throughout, and add `--signer local` to any
+run whose account is a key you hold:
+
+    ./sqd batches/peers-01-eoa-5CF5A099-275.txt --action deregister --signer local
+
+That skips Fireblocks entirely for that run and asks for the key instead. If you
+forget it, the run stops and says which account it needs and that `--signer
+local` is how to provide it — nothing is sent either way.
+
+Dry runs need no credential at all, so the whole pre-flight works regardless.
+
 ### The eleven files and who signs them
 
 | File | Workers | Signed by |

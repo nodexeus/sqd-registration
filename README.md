@@ -411,6 +411,13 @@ queued for policy evaluation and MPC signing before it is even broadcast.
 
 `--address` selects which vault account to use when the endpoint offers several.
 
+A single job may span accounts in different places. `--signer local` on an
+individual run bypasses the proxy and asks for a key instead, so
+`fireblocks.env` can stay in place for the runs that need it. If a run does go
+to Fireblocks and the vault does not hold the account it needs, the error names
+that account and points at `--signer local` rather than reporting an opaque
+workspace failure.
+
 > **Check the approval policy before a large run.** Fireblocks evaluates every
 > transaction against its Transaction Authorization Policy. Automated signing
 > needs an **API Co-Signer** plus a TAP rule that approves these calls;

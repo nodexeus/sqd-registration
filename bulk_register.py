@@ -968,7 +968,7 @@ class RemoteSigner:
         return w3.eth.send_transaction(payload)
 
 
-def build_signer(args, w3):
+def build_signer(args, w3, required: str | None = None):
     """The signer for this run: a local key, or the RPC endpoint itself."""
     if args.signer != FIREBLOCKS_SIGNER:
         return LocalSigner(load_signer())
@@ -1010,6 +1010,20 @@ def build_signer(args, w3):
             "       If it is the proxy, check the vault account has this chain's "
             "asset enabled."
         )
+    # A job can span accounts in different places: one in Fireblocks, others
+    # held directly. Saying which account this run needs, and how to sign for
+    # it locally, beats failing on a vault that was never going to hold it.
+    if required and required.lower() not in {a.lower() for a in accounts}:
+        fail(
+            f"this run must be signed by {required}, which the Fireblocks "
+            "vault does not hold.\n"
+            f"       It offers: {', '.join(accounts)}\n"
+            "       If that account's key is held elsewhere, add --signer local "
+            "to use it for this\n"
+            "       run; fireblocks.env can stay in place for the runs that do "
+            "need it."
+        )
+
     if args.address:
         chosen = args.address
         if chosen.lower() not in {a.lower() for a in accounts}:
@@ -1749,7 +1763,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             print("(dry run: no credential needed)")
     else:
-        signer = build_signer(args, w3)
+        signer = build_signer(args, w3, required)
         owner = signer.address
 
     if signer is not None and required and required.lower() != owner.lower():
