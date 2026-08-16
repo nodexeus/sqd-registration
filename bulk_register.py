@@ -82,6 +82,8 @@ from sqdreg.networks import NETWORKS
 from sqdreg.peerids import PeerIdError, parse_file, parse_peer_ids
 from sqdreg.registry import (
     ACTIVE,
+    DirectCalls,
+    VestingCalls,
     REGISTERED,
     FALLBACK_REGISTER_GAS,
     Treasury,
@@ -292,6 +294,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "act on this peer ID only, instead of the whole file; repeat for "
             "several. Each must appear in the file"
+        ),
+    )
+    parser.add_argument(
+        "--via-vesting",
+        metavar="ADDRESS",
+        help=(
+            "route every call through this holding contract's execute(). "
+            "Required when the workers were registered by a vesting contract: "
+            "it is their creator, so register/deregister/withdraw check against "
+            "it and not against the signing account. Use tools/owners.py to "
+            "find which contract holds which peer ID"
         ),
     )
     parser.add_argument(
@@ -1003,7 +1016,8 @@ def send_and_wait(w3, signer, tx, label: str = "transaction") -> tuple[str, dict
 
 
 def register_all(
-    w3, signer, registry, work, runlog, fees, gas, network, action=REGISTER
+    w3, signer, registry, work, runlog, fees, gas, network, action=REGISTER,
+    calls=None, bond=0,
 ) -> RunResult:
     """Act on each peer in turn, logging every attempt as it resolves."""
     result = RunResult()
@@ -1050,6 +1064,8 @@ def register_all(
 
         peer_id = item.entry.peer_id
         label = f"{peer_id} as {item.name}" if item.name else peer_id
+        if calls is None:
+            calls = DirectCalls(signer.address)
         if action == REGISTER:
             tx = registry.build_register(
                 peer_bytes=item.entry.peer_bytes,
@@ -1066,6 +1082,10 @@ def register_all(
             tx = registry.build_withdraw(
                 peer_bytes=item.entry.peer_bytes, nonce=nonce, fees=fees, gas=gas
             )
+        # Through a holding contract, execute() approves the bond itself right
+        # before forwarding, so registration needs no separate allowance and
+        # leaves none standing. The other actions move nothing in.
+        tx = calls.wrap(tx, bond if action == REGISTER else 0)
         print(f"[{position}/{total}] {label}", flush=True)
 
         # A local signer knows the hash before broadcasting, so a failed send
@@ -1278,7 +1298,7 @@ def write_status_csv(path: str, rows) -> int:
 
 
 def run_state_action(
-    args, network, w3, registry, runlog, signer, owner, entries, log_path
+    args, network, w3, registry, runlog, signer, owner, entries, log_path, calls
 ):
     """Handle status, deregister and withdraw.
 
@@ -1405,7 +1425,7 @@ def run_state_action(
     fees = read_rpc(current_fees, w3, what="fee read")
     result = register_all(
         w3, signer, registry, work, runlog,
-        fees=fees, gas=gas, network=network.name, action=action,
+        fees=fees, gas=gas, network=network.name, action=action, calls=calls,
     )
 
     csv_path = f"{base}.{network.name}.{CSV_NOUN[action]}.csv"
@@ -1424,7 +1444,7 @@ def run_state_action(
     return 1 if result.failed or result.pending else 0
 
 
-def run_claim(args, network, w3, registry, runlog, signer, owner):
+def run_claim(args, network, w3, registry, runlog, signer, owner, calls):
     """Sweep every reward this wallet has earned, in one transaction.
 
     Needs no peer IDs: the distributor loops over getOwnedWorkers(msg.sender)
@@ -1486,7 +1506,10 @@ def run_claim(args, network, w3, registry, runlog, signer, owner):
     amount = format_units(claimable, decimals)
     try:
         tx_hash, receipt = send_and_wait(
-            w3, signer, treasury.build_claim(nonce, fees, gas), label="claim"
+            w3,
+            signer,
+            calls.wrap(treasury.build_claim(nonce, fees, gas)),
+            label="claim",
         )
     except SendFailed as exc:
         runlog.append(
@@ -1520,6 +1543,11 @@ def main(argv: list[str] | None = None) -> int:
     base = artifact_base(args.peer_id_file)
     log_path = args.log or default_log_path(base, network.name)
 
+    # Checked before connecting or asking for a credential: a typo here should
+    # not cost a prompt or a round trip.
+    if args.via_vesting and not Web3.is_address(args.via_vesting):
+        fail(f"--via-vesting is not an address: {args.via_vesting!r}")
+
     if args.address:
         if args.action != STATUS and args.signer != FIREBLOCKS_SIGNER:
             fail(
@@ -1543,11 +1571,30 @@ def main(argv: list[str] | None = None) -> int:
     else:
         signer = build_signer(args, w3)
         owner = signer.address
-    registry = Registry(w3, network, owner)
+    # With --via-vesting the holding contract is the account the registry sees:
+    # it owns the workers and holds the bond, while `owner` merely signs. Every
+    # read must therefore be about the contract, not the signer.
+    if args.via_vesting:
+        calls = VestingCalls(w3, network, args.via_vesting, owner)
+        acting = calls.address
+        controller = read_rpc(calls.controller, what="vesting owner() read")
+        if controller.lower() != owner.lower():
+            fail(
+                f"{acting} only accepts execute() from {controller}, but this "
+                f"run signs as {owner}.\n"
+                "       That contract restricts execute() to its own owner(), "
+                "so the run must be signed by that account."
+            )
+        print(f"via vesting: {acting} (driven by {controller})")
+    else:
+        calls = DirectCalls(owner)
+        acting = owner
+
+    registry = Registry(w3, network, acting)
     runlog = RunLog(log_path)
 
     if args.action == CLAIM:
-        return run_claim(args, network, w3, registry, runlog, signer, owner)
+        return run_claim(args, network, w3, registry, runlog, signer, acting, calls)
 
     try:
         if args.peer_id_file:
@@ -1571,7 +1618,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.action != REGISTER:
         return run_state_action(args, network, w3, registry, runlog, signer,
-                                owner, entries, log_path)
+                                acting, entries, log_path, calls)
 
     # Filter first, then name: numbers are handed out from the first unused
     # value, so naming peers that are about to be skipped would burn them.
@@ -1601,7 +1648,7 @@ def main(argv: list[str] | None = None) -> int:
         fail(str(exc))
 
     print(f"network:     {network.name} (chain {network.chain_id})")
-    print(f"wallet:      {owner}")
+    print(f"wallet:      {acting}")
     print(f"log:         {log_path}")
     label = "in file" if args.peer_id_file else "peer IDs"
     print(f"{label + ':':<12} {len(entries)}")
@@ -1662,7 +1709,12 @@ def main(argv: list[str] | None = None) -> int:
     # base fee at the moment they were read.
     fees = read_rpc(current_fees, w3, what="fee read")
 
-    if funds.needs_approval:
+    if funds.needs_approval and args.via_vesting:
+        print(
+            "approval:    not needed — execute() approves each bond itself, so "
+            "no allowance is left standing"
+        )
+    elif funds.needs_approval:
         approve_nonce = (
             None
             if signer.manages_nonce
@@ -1707,6 +1759,8 @@ def main(argv: list[str] | None = None) -> int:
         fees=fees,
         gas=gas,
         network=network.name,
+        calls=calls,
+        bond=funds.bond,
     )
 
     # Regenerated from the log after every real run, so the operator always has

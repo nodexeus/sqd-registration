@@ -520,3 +520,84 @@ class Treasury:
                 FALLBACK_CLAIM_BASE_GAS + CLAIM_GAS_PER_WORKER * worker_count,
                 False,
             )
+
+
+VESTING_ABI = [
+    {
+        "inputs": [
+            {"name": "to", "type": "address"},
+            {"name": "data", "type": "bytes"},
+            {"name": "requiredApprove", "type": "uint256"},
+        ],
+        "name": "execute",
+        "outputs": [{"name": "", "type": "bytes"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "owner",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+
+class DirectCalls:
+    """Transactions sent straight from the signing account."""
+
+    address = None
+
+    def __init__(self, signer_address: str):
+        self.signer_address = signer_address
+
+    def wrap(self, tx: dict, required_approve: int = 0) -> dict:
+        return tx
+
+
+class VestingCalls:
+    """Transactions routed through a holding contract's execute().
+
+    A worker registered by a vesting contract has that contract as its
+    `creator`, and register/deregister/withdraw all check
+    `creator == msg.sender`. The beneficiary therefore cannot call them
+    directly: it drives them through `execute(to, data, requiredApprove)`,
+    which the contract restricts to its own `owner()`.
+
+    `requiredApprove` also removes the separate approval step for
+    registration: the contract approves exactly that amount immediately before
+    forwarding the call, so no allowance is left standing afterwards.
+    """
+
+    def __init__(self, w3, network: Network, address: str, signer_address: str):
+        self.w3 = w3
+        self.network = network
+        self.address = w3.to_checksum_address(address)
+        self.signer_address = signer_address
+        self.contract = w3.eth.contract(address=self.address, abi=VESTING_ABI)
+
+    def controller(self) -> str:
+        """The only account allowed to call execute()."""
+        return self.contract.functions.owner().call()
+
+    def wrap(self, tx: dict, required_approve: int = 0) -> dict:
+        """Re-target an inner transaction through execute().
+
+        The inner transaction is built normally and then unpacked: only its
+        destination and calldata matter, since the outer call carries the
+        sender, gas and fees.
+        """
+        outer = {
+            "from": self.signer_address,
+            "chainId": self.network.chain_id,
+            "gas": tx["gas"],
+        }
+        for field in ("nonce", "maxFeePerGas", "maxPriorityFeePerGas", "gasPrice"):
+            if field in tx:
+                outer[field] = tx[field]
+        return self.contract.functions.execute(
+            self.w3.to_checksum_address(tx["to"]),
+            bytes.fromhex(tx["data"][2:] if tx["data"].startswith("0x") else tx["data"]),
+            required_approve,
+        ).build_transaction(outer)

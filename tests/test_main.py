@@ -525,7 +525,7 @@ def test_each_template_starts_its_own_sequence_across_runs(wired, tmp_path):
     def run(template):
         captured = {}
         with patch.object(bulk_register, "register_all") as register_all:
-            def record(w3, account, reg, work, runlog, fees, gas, network):
+            def record(w3, account, reg, work, runlog, fees, gas, network, **_kw):
                 captured["names"] = [w.name for w in work]
                 for w in work:
                     runlog.append(
@@ -566,7 +566,7 @@ def test_an_interrupted_group_resumes_its_numbering(wired, tmp_path):
     captured = {}
     with patch.object(bulk_register, "register_all") as register_all:
 
-        def record(w3, account, reg, work, runlog, fees, gas, network):
+        def record(w3, account, reg, work, runlog, fees, gas, network, **_kw):
             captured["names"] = [w.name for w in work]
             return bulk_register.RunResult(registered=len(work))
 
@@ -582,7 +582,7 @@ def test_an_interrupted_group_resumes_its_numbering(wired, tmp_path):
 def test_a_real_run_writes_the_registered_csv(wired, tmp_path):
     path = make_peer_file(tmp_path, 2)
     with patch.object(bulk_register, "register_all") as register_all:
-        def record(w3, account, reg, work, runlog, fees, gas, network):
+        def record(w3, account, reg, work, runlog, fees, gas, network, **_kw):
             for w in work:
                 runlog.append(
                     Record(

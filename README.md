@@ -520,6 +520,35 @@ never makes a later `register` run skip that peer ID. Records written before the
 field existed read as registrations. Each action writes its own CSV:
 `registered.csv`, `deregistered.csv`, `withdrawn.csv`.
 
+## Workers held by a vesting contract
+
+If `tools/owners.py` reports `vesting`, that contract is the worker's `creator`.
+`register`, `deregister` and `withdraw` all check `creator == msg.sender`, so
+the beneficiary cannot call them directly — verified against mainnet:
+
+    beneficiary -> registry.deregister()            rejected: Not worker creator
+    beneficiary -> vesting.execute(deregister)      accepted
+    anyone else -> vesting.execute(deregister)      rejected: Not allowed to execute
+
+`--via-vesting` routes every call through the contract's `execute()`:
+
+    ./sqd peer_ids.txt --action deregister \
+        --via-vesting 0xB35728D533Ea887862b9Ed00cfe2B7F3D36A4e71
+
+The run must be signed by that contract's `owner()`; the tool reads it up front
+and refuses rather than letting the transaction revert. All reads — worker
+state, bond, balance, allowance, rewards — are then about the contract, since it
+is the account that owns the workers and holds the SQD.
+
+One peer ID file may span several holding contracts. Run once per contract with
+`--peer-id`, or split the file, because a single `--via-vesting` applies to the
+whole run.
+
+Registration through a holding contract needs **no separate approval**:
+`execute(to, data, requiredApprove)` approves exactly the bond immediately
+before forwarding the call, so nothing is left standing afterwards. The wrapper
+costs about 2,600 gas over a direct call.
+
 ## Who registered a worker
 
 `tools/owners.py` reports, for each peer ID in a file, the account that
