@@ -76,6 +76,7 @@ from sqdreg.networks import NETWORKS
 from sqdreg.peerids import PeerIdError, parse_file, parse_peer_ids
 from sqdreg.registry import (
     ACTIVE,
+    FALLBACK_REGISTER_GAS,
     Treasury,
     REGISTERING,
     FOREIGN,
@@ -133,6 +134,16 @@ CSV_NOUN = {
 MAX_CONSECUTIVE_FAILURES = 3
 RECEIPT_TIMEOUT = 300
 GAS_BUFFER_PERCENT = 25
+
+# Where a gas limit came from, so the plan can say so honestly.
+GAS_MEASURED = "measured"   # estimated against the chain
+GAS_DEFERRED = "deferred"   # not attempted yet: it would revert pre-approval
+GAS_FALLBACK = "fallback"   # attempted and reverted
+GAS_BASIS_NOTE = {
+    GAS_MEASURED: "",
+    GAS_DEFERRED: " (projected; measured once the approval lands)",
+    GAS_FALLBACK: " (estimate unavailable, using fallback)",
+}
 # A live estimate against the mainnet SQD token put approve() at 47,137 gas.
 # Rounded up for headroom; it is one transaction in a run of hundreds, so its
 # precision barely moves the budget.
@@ -704,21 +715,33 @@ def refreshed_fees(w3, fees: dict) -> dict:
         return fees
 
 
-def gas_limit_for(registry, work) -> tuple[int, bool]:
+def gas_limit_for(registry, work, estimate: bool = True) -> tuple[int, str]:
     """Pick one gas limit for every registration in the run.
 
     Gas scales with metadata length and one limit is reused for the whole run,
-    so the estimate is taken against the *longest* metadata — the most
+    so the measurement is taken against the *longest* metadata — the most
     expensive call. A shorter name can then never exceed it. The result is
     padded to absorb ordinary variation.
+
+    Pass `estimate=False` when the allowance is not yet in place. register()
+    calls transferFrom, so estimating before the approval is a call we know will
+    revert: it wastes a round trip, and a signing provider reports the revert as
+    an error — an alarming thing to show an operator about to move millions,
+    for a call that was never going to succeed.
+
+    Returns (gas, basis) where basis explains where the number came from.
     """
     if not work:
         fail("no peers to register")
     longest = max(work, key=lambda candidate: len(candidate.metadata.encode()))
-    estimate, exact = registry.estimate_register_gas(
-        longest.entry.peer_bytes, longest.metadata
-    )
-    return estimate + estimate * GAS_BUFFER_PERCENT // 100, exact
+    if not estimate:
+        raw, basis = FALLBACK_REGISTER_GAS, GAS_DEFERRED
+    else:
+        raw, exact = registry.estimate_register_gas(
+            longest.entry.peer_bytes, longest.metadata
+        )
+        basis = GAS_MEASURED if exact else GAS_FALLBACK
+    return raw + raw * GAS_BUFFER_PERCENT // 100, basis
 
 
 def format_units(amount: int, decimals: int) -> str:
@@ -1538,7 +1561,8 @@ def main(argv: list[str] | None = None) -> int:
 
     funds = check_funds(registry, len(work))
     decimals = read_rpc(registry.token_decimals, what="token decimals read")
-    gas, exact = gas_limit_for(registry, work)
+    # register() reverts while the allowance is missing, so do not ask.
+    gas, gas_basis = gas_limit_for(registry, work, estimate=not funds.needs_approval)
     fees = read_rpc(current_fees, w3, what="fee read")
     eth = check_eth(
         w3, owner, gas, fees, len(work), funds.needs_approval
@@ -1549,7 +1573,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"balance:     {format_units(funds.balance, decimals)} SQD")
     print(
         f"gas:         ~{format_units(eth.required, 18)} ETH max"
-        f"{'' if exact else ' (estimate unavailable, using fallback)'}"
+        f"{GAS_BASIS_NOTE[gas_basis]}"
     )
     print(f"ETH balance: {format_units(eth.balance, 18)} ETH")
     if funds.needs_approval:
@@ -1615,11 +1639,8 @@ def main(argv: list[str] | None = None) -> int:
     # measurement. After the approval the estimate is real. When no approval was
     # needed the first estimate was already exact and this simply repeats it,
     # which keeps one code path.
-    gas, exact = gas_limit_for(registry, work)
-    print(
-        f"gas limit:   {gas} per registration"
-        f"{'' if exact else ' (estimate unavailable, using fallback)'}"
-    )
+    gas, gas_basis = gas_limit_for(registry, work)
+    print(f"gas limit:   {gas} per registration{GAS_BASIS_NOTE[gas_basis]}")
 
     result = register_all(
         w3,

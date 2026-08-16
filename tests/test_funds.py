@@ -161,9 +161,9 @@ def test_gas_limit_estimates_against_the_longest_metadata():
         item("c", ""),
     ]
 
-    gas, exact = bulk_register.gas_limit_for(registry, work)
+    gas, basis = bulk_register.gas_limit_for(registry, work)
 
-    assert exact is True
+    assert basis == bulk_register.GAS_MEASURED
     assert gas == 250000  # 200000 + 25%
     registry.estimate_register_gas.assert_called_once_with(
         b"b", '{"name":"a-much-longer-worker-name"}'
@@ -174,9 +174,9 @@ def test_gas_limit_reports_an_inexact_estimate():
     registry = MagicMock()
     registry.estimate_register_gas.return_value = (400000, False)
 
-    gas, exact = bulk_register.gas_limit_for(registry, [item("a", "")])
+    gas, basis = bulk_register.gas_limit_for(registry, [item("a", "")])
 
-    assert exact is False
+    assert basis == bulk_register.GAS_FALLBACK
     assert gas == 500000
 
 
@@ -200,7 +200,7 @@ def test_gas_limit_prefers_longest_metadata_by_byte_length_not_codepoints():
         item("c", ""),
     ]
 
-    gas, exact = bulk_register.gas_limit_for(registry, work)
+    gas, _basis = bulk_register.gas_limit_for(registry, work)
 
     # Should estimate against item "b" (30 bytes is longest), not "a" (25 codepoints is longest)
     registry.estimate_register_gas.assert_called_once_with(
@@ -406,3 +406,26 @@ def test_the_csv_path_includes_the_network():
         bulk_register.default_csv_path("peers.txt", "tethys")
         == "peers.txt.tethys.registered.csv"
     )
+
+
+def test_a_doomed_estimate_is_not_attempted():
+    """register() reverts before the approval, and a signing provider reports
+    that revert as a loud error. Never ask a question with a known answer."""
+    registry = MagicMock()
+
+    gas, basis = bulk_register.gas_limit_for(
+        registry, [item("a", "")], estimate=False
+    )
+
+    registry.estimate_register_gas.assert_not_called()
+    assert basis == bulk_register.GAS_DEFERRED
+    from sqdreg.registry import FALLBACK_REGISTER_GAS
+
+    assert gas == FALLBACK_REGISTER_GAS + FALLBACK_REGISTER_GAS * 25 // 100
+
+
+def test_the_deferred_note_promises_a_later_measurement():
+    assert "measured once the approval lands" in (
+        bulk_register.GAS_BASIS_NOTE[bulk_register.GAS_DEFERRED]
+    )
+    assert bulk_register.GAS_BASIS_NOTE[bulk_register.GAS_MEASURED] == ""

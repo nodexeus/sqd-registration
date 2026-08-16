@@ -200,17 +200,17 @@ def test_fees_are_recomputed_after_the_confirmation(wired, tmp_path, monkeypatch
     assert fees.call_count == 2
 
 
-def test_gas_is_re_estimated_after_the_approval(wired, tmp_path):
-    """The pre-approval estimate is always the fallback on a first run.
+def test_gas_is_measured_once_and_only_after_the_approval(wired, tmp_path):
+    """The only useful measurement is the one taken after the allowance exists.
 
-    register() reverts without an allowance, so estimation reverts too. Only a
-    measurement taken *after* the approval receipt is real, and that is the one
-    the registrations must use — a too-small limit reverts every send
-    out-of-gas.
+    Before it, register() reverts because transferFrom does, so estimating is a
+    call with a known answer — and a signing provider logs that revert as an
+    error, which is alarming to show an operator mid-run. So the plan projects,
+    and the run measures once the approval has landed.
     """
     _, _, registry = wired
-    registry.allowance.return_value = 0
-    registry.estimate_register_gas.side_effect = [(300000, False), (480000, True)]
+    registry.allowance.return_value = 0  # forces an approval
+    registry.estimate_register_gas.return_value = (480000, True)
     path = make_peer_file(tmp_path, 2)
 
     with patch.object(bulk_register, "send_and_wait") as send_and_wait, patch.object(
@@ -221,12 +221,26 @@ def test_gas_is_re_estimated_after_the_approval(wired, tmp_path):
             {"status": 1, "gasUsed": 1, "blockNumber": 1},
         )
         register_all.return_value = bulk_register.RunResult(registered=2)
-        bulk_register.main([str(path), "--yes", "--log", str(tmp_path / "l.jsonl")])
+        bulk_register.main(
+            [str(path), "--yes", "--log", str(tmp_path / "l.jsonl")]
+        )
 
-    assert registry.estimate_register_gas.call_count == 2
-    # 480000 + 25%, the post-approval measurement — not 300000 + 25%.
-    assert register_all.call_args.kwargs["gas"] == 600000
+    # Once, not twice: the doomed pre-approval estimate is never attempted.
+    assert registry.estimate_register_gas.call_count == 1
+    # And the registrations use that measurement, padded.
+    assert register_all.call_args.kwargs["gas"] == 480000 + 480000 * 25 // 100
 
+
+def test_the_plan_says_the_gas_figure_is_projected(wired, tmp_path, capsys):
+    _, _, registry = wired
+    registry.allowance.return_value = 0
+    path = make_peer_file(tmp_path, 1)
+
+    bulk_register.main([str(path), "--dry-run", "--log", str(tmp_path / "l.jsonl")])
+
+    out = capsys.readouterr().out
+    assert "measured once the approval lands" in out
+    registry.estimate_register_gas.assert_not_called()
 
 def test_an_approval_send_failure_exits_cleanly_with_the_hash(wired, tmp_path, capsys):
     """A broadcast-but-unresolved approval must not be a raw traceback.

@@ -87,10 +87,18 @@ Always `--dry-run` first. It reports the bond total, the estimated gas, whether
 an approval is needed, and exactly which peer IDs would be registered under
 which names.
 
-The gas figure in that plan is approximate, and labelled as such when the wallet
-has no allowance yet: `register()` reverts without an allowance, so gas cannot be
-measured until the approval has landed. The run re-measures gas immediately after
-the approval receipt and prints the limit it will actually use.
+The gas figure in that plan is a **projection** when the wallet has no allowance
+yet, and says so: `register()` calls `transferFrom`, so estimating before the
+approval is a call with a known answer. The script does not make it — asking
+would waste a round trip and, with a signing provider such as Fireblocks, would
+surface the revert as a loud error about a call that was never going to succeed.
+
+Once the approval has landed the run measures gas for real and prints the limit
+it will actually use, so the number that matters is always measured:
+
+    gas:         ~0.0000405 ETH max (projected; measured once the approval lands)
+    ...
+    gas limit:   475000 per registration
 
 ## The run log is per network
 
