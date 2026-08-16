@@ -113,7 +113,11 @@ def test_the_other_actions_approve_nothing():
 
 
 def test_a_signer_that_is_not_the_owner_is_rejected(monkeypatch, tmp_path, capsys):
-    """execute() is restricted to owner(); failing early beats reverting."""
+    """execute() is restricted to owner(); failing early beats reverting.
+
+    Checked on a real run rather than a dry run: a dry run needs no signer at
+    all, so there is nothing to mismatch.
+    """
     account = MagicMock()
     account.address = "0x000000000000000000000000000000000000dEaD"
     w3 = MagicMock()
@@ -130,7 +134,7 @@ def test_a_signer_that_is_not_the_owner_is_rejected(monkeypatch, tmp_path, capsy
 
     with pytest.raises(SystemExit) as exc:
         bulk_register.main(
-            [str(path), "--action", "status", "--via-vesting", VESTING]
+            [str(path), "--action", "claim", "--via-vesting", VESTING, "--yes"]
         )
 
     assert exc.value.code == 2
@@ -138,6 +142,40 @@ def test_a_signer_that_is_not_the_owner_is_rejected(monkeypatch, tmp_path, capsy
     assert "can only be acted on by" in err
     assert BENEFICIARY in err
 
+
+def test_a_dry_run_through_a_vesting_contract_needs_no_credential(
+    monkeypatch, tmp_path, capsys
+):
+    """The acting account is the contract, so there is nothing to unlock."""
+    w3 = MagicMock()
+    w3.to_checksum_address.side_effect = lambda v: v
+    w3.eth.get_balance.return_value = 10**18
+    contract = MagicMock()
+    contract.functions.owner.return_value.call.return_value = BENEFICIARY
+    w3.eth.contract.return_value = contract
+
+    registry = MagicMock()
+    registry.token_decimals.return_value = 18
+    registry.owned_worker_ids.return_value = set()
+    treasury = MagicMock()
+    treasury.claimable.return_value = 0
+
+    monkeypatch.setattr(bulk_register, "connect", lambda n, r: w3)
+    monkeypatch.setattr(bulk_register, "Registry", lambda *a, **k: registry)
+    monkeypatch.setattr(bulk_register, "Treasury", lambda *a, **k: treasury)
+    monkeypatch.setattr(
+        bulk_register, "load_signer", lambda: pytest.fail("asked for a credential")
+    )
+    monkeypatch.setattr(bulk_register.time, "sleep", lambda _s: None)
+
+    code = bulk_register.main(
+        ["--action", "claim", "--via-vesting", VESTING, "--dry-run"]
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "no credential needed" in out
+    assert BENEFICIARY in out   # still says who would have to sign
 
 def test_a_malformed_vesting_address_is_rejected(tmp_path, capsys):
     path = tmp_path / "peers.txt"

@@ -480,18 +480,56 @@ def test_insufficient_eth_aborts_before_any_transaction(wired, tmp_path, capsys)
     assert "ETH balance:" in err.out
 
 
-def test_a_dry_run_also_reports_insufficient_eth(wired, tmp_path):
-    """Catching it in a dry run is the point of a pre-check."""
+def test_a_dry_run_reports_a_shortfall_but_still_exits_zero(wired, tmp_path, capsys):
+    """A dry run is a report, not a gate.
+
+    Exiting non-zero makes it unusable in a loop over many files, and stopping
+    at the first problem hides the rest. A real run still refuses.
+    """
+    _, w3, _ = wired
+    w3.eth.get_balance.return_value = 1  # 1 wei
+    path = make_peer_file(tmp_path, 3)
+
+    code = bulk_register.main(
+        [str(path), "--dry-run", "--log", str(tmp_path / "l.jsonl")]
+    )
+
+    assert code == 0
+    w3.eth.send_raw_transaction.assert_not_called()
+    captured = capsys.readouterr()
+    assert "SHORTFALL" in captured.err
+    assert "insufficient ETH" in captured.err
+    # and the plan is still printed, so every problem is visible at once
+    assert "dry run" in captured.out.lower()
+
+
+def test_a_real_run_still_refuses_on_a_shortfall(wired, tmp_path):
     _, w3, _ = wired
     w3.eth.get_balance.return_value = 1
     path = make_peer_file(tmp_path, 3)
 
     with pytest.raises(SystemExit) as exc:
-        bulk_register.main([str(path), "--dry-run", "--log", str(tmp_path / "l.jsonl")])
+        bulk_register.main([str(path), "--yes", "--log", str(tmp_path / "l.jsonl")])
 
     assert exc.value.code == 2
     w3.eth.send_raw_transaction.assert_not_called()
 
+
+def test_a_dry_run_reports_both_shortfalls_at_once(wired, tmp_path, capsys):
+    """Stopping at the SQD problem would hide the ETH one."""
+    _, w3, registry = wired
+    registry.sqd_balance.return_value = 0
+    w3.eth.get_balance.return_value = 1
+    path = make_peer_file(tmp_path, 2)
+
+    code = bulk_register.main(
+        [str(path), "--dry-run", "--log", str(tmp_path / "l.jsonl")]
+    )
+
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "insufficient SQD" in err
+    assert "insufficient ETH" in err
 
 def test_the_eth_budget_covers_the_approval_when_one_is_needed(wired, tmp_path, capsys):
     _, w3, registry = wired

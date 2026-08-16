@@ -670,8 +670,8 @@ class FundsCheck:
     needs_approval: bool
 
 
-def check_funds(registry, count: int) -> FundsCheck:
-    """Verify the wallet can bond `count` workers; exit if it cannot."""
+def check_funds(registry, count: int, dry_run: bool = False) -> FundsCheck:
+    """Verify the wallet can bond `count` workers."""
     bond = read_rpc(registry.bond_amount, what="bondAmount() read")
     required = bond * count
     balance = read_rpc(registry.sqd_balance, what="SQD balance read")
@@ -679,9 +679,10 @@ def check_funds(registry, count: int) -> FundsCheck:
 
     if balance < required:
         decimals = read_rpc(registry.token_decimals, what="token decimals read")
-        fail(
+        shortfall(
             f"insufficient SQD: need {format_units(required, decimals)} "
-            f"to bond {count} workers, hold {format_units(balance, decimals)}"
+            f"to bond {count} workers, hold {format_units(balance, decimals)}",
+            dry_run,
         )
 
     return FundsCheck(
@@ -725,6 +726,33 @@ class EthCheck:
     balance: int
     required: int
     sufficient: bool
+
+
+def shortfall(message: str, dry_run: bool) -> None:
+    """Report a funding problem, fatally on a real run.
+
+    A dry run is a report rather than a gate: it should surface every problem
+    at once and still exit 0, so it can be looped over many files. A real run
+    stops, because sending part of a batch and then running dry is worse than
+    not starting.
+    """
+    if dry_run:
+        print(f"SHORTFALL:   {message}", file=sys.stderr)
+    else:
+        fail(message)
+
+
+def gas_payer(signer, acting: str, required: str | None) -> str:
+    """Whose ETH pays for the transactions.
+
+    Not always the account being acted upon. Through a vesting contract the
+    contract owns the workers and holds the SQD, but the transaction is sent by
+    its beneficiary, so the beneficiary pays the gas. Checking the contract's
+    balance would report a shortfall on an account that never spends anything.
+    """
+    if signer is not None:
+        return signer.address
+    return required or acting
 
 
 def check_eth(
@@ -1328,7 +1356,8 @@ def write_status_csv(path: str, rows) -> int:
 
 
 def run_state_action(
-    args, network, w3, registry, runlog, signer, owner, entries, log_path, calls
+    args, network, w3, registry, runlog, signer, owner, entries, log_path, calls,
+    payer,
 ):
     """Handle status, deregister and withdraw.
 
@@ -1420,13 +1449,13 @@ def run_state_action(
     )
     gas = raw_gas + raw_gas * GAS_BUFFER_PERCENT // 100
     fees = read_rpc(current_fees, w3, what="fee read")
-    eth = check_eth(w3, owner, gas, fees, len(work), needs_approval=False)
+    eth = check_eth(w3, payer, gas, fees, len(work), needs_approval=False)
 
     print(
         f"gas:         ~{format_units(eth.required, 18)} ETH max"
         f"{'' if exact else ' (estimate unavailable, using fallback)'}"
     )
-    print(f"ETH balance: {format_units(eth.balance, 18)} ETH")
+    print(f"ETH balance: {format_units(eth.balance, 18)} ETH ({payer})")
     if action == WITHDRAW:
         returning = sum(
             st.bond for entry, st in zip(entries, states)
@@ -1435,10 +1464,11 @@ def run_state_action(
         print(f"returning:   {format_units(returning, 18)} SQD to {owner}")
 
     if not eth.sufficient:
-        fail(
+        shortfall(
             f"insufficient ETH for gas: need up to "
             f"{format_units(eth.required, 18)} ETH to cover {len(work)} "
-            f"transaction(s), hold {format_units(eth.balance, 18)} ETH"
+            f"transaction(s), hold {format_units(eth.balance, 18)} ETH",
+            args.dry_run,
         )
 
     if args.dry_run:
@@ -1474,7 +1504,7 @@ def run_state_action(
     return 1 if result.failed or result.pending else 0
 
 
-def run_claim(args, network, w3, registry, runlog, signer, owner, calls):
+def run_claim(args, network, w3, registry, runlog, signer, owner, calls, payer):
     """Sweep every reward this wallet has earned, in one transaction.
 
     Needs no peer IDs: the distributor loops over getOwnedWorkers(msg.sender)
@@ -1500,19 +1530,20 @@ def run_claim(args, network, w3, registry, runlog, signer, owner, calls):
     )
     gas = raw_gas + raw_gas * GAS_BUFFER_PERCENT // 100
     fees = read_rpc(current_fees, w3, what="fee read")
-    eth = check_eth(w3, owner, gas, fees, 1, needs_approval=False)
+    eth = check_eth(w3, payer, gas, fees, 1, needs_approval=False)
 
     print(
         f"gas:         ~{format_units(eth.required, 18)} ETH max"
         f"{'' if exact else ' (estimate unavailable, projected from fleet size)'}"
     )
-    print(f"ETH balance: {format_units(eth.balance, 18)} ETH")
+    print(f"ETH balance: {format_units(eth.balance, 18)} ETH ({payer})")
 
     if not eth.sufficient:
-        fail(
+        shortfall(
             f"insufficient ETH for gas: need up to "
             f"{format_units(eth.required, 18)} ETH, hold "
-            f"{format_units(eth.balance, 18)} ETH"
+            f"{format_units(eth.balance, 18)} ETH",
+            args.dry_run,
         )
 
     if args.dry_run:
@@ -1651,12 +1682,17 @@ def main(argv: list[str] | None = None) -> int:
         fail(f"--via-vesting is not an address: {args.via_vesting!r}")
 
     if args.address:
-        if args.action != STATUS and args.signer != FIREBLOCKS_SIGNER:
+        if (
+            args.action != STATUS
+            and args.signer != FIREBLOCKS_SIGNER
+            and not args.dry_run
+        ):
             fail(
-                f"--address only applies to --action status, or to "
-                f"--signer fireblocks where it selects which vault account to "
-                f"use; --action {args.action} otherwise acts as whoever holds "
-                "the credential. To act on specific peer IDs use --peer-id."
+                f"--address only applies to --action status, to a --dry-run, "
+                f"or to --signer fireblocks where it selects which vault "
+                f"account to use; --action {args.action} otherwise acts as "
+                "whoever holds the credential. To act on specific peer IDs "
+                "use --peer-id."
             )
         if not Web3.is_address(args.address):
             fail(
@@ -1690,21 +1726,35 @@ def main(argv: list[str] | None = None) -> int:
 
     calls, acting, required = signing_context(args, network, w3, entries)
 
-    # Status is read-only, so an address is enough and no signer is needed.
-    if args.action == STATUS and args.address:
+    # Nothing below sends anything unless a signer exists, so a credential is
+    # only worth asking for when one will actually be used. A dry run that
+    # already knows whose position to report — from --address, --via-vesting or
+    # the workers themselves — needs no key, which makes a whole pre-flight
+    # across many files possible without unlocking anything.
+    inspect_only = args.action == STATUS or args.dry_run
+    known_address = args.address or acting
+
+    if inspect_only and known_address:
         signer = None
-        owner = args.address
+        owner = known_address
+        if args.dry_run:
+            print("(dry run: no credential needed)")
     else:
         signer = build_signer(args, w3)
         owner = signer.address
 
-    if required and required.lower() != owner.lower():
+    if signer is not None and required and required.lower() != owner.lower():
         fail(
             f"these workers can only be acted on by {required}, but this run "
             f"signs as {owner}.\n"
             "       Use that account's credential, or --peer-id to select "
             "workers this one owns."
         )
+    if signer is None and required:
+        print(f"would be signed by: {required}")
+
+    payer = gas_payer(signer, acting or owner, required)
+
     if calls is None:
         calls = DirectCalls(owner)
     if acting is None:
@@ -1715,7 +1765,9 @@ def main(argv: list[str] | None = None) -> int:
     runlog = RunLog(log_path)
 
     if args.action == CLAIM:
-        return run_claim(args, network, w3, registry, runlog, signer, acting, calls)
+        return run_claim(
+            args, network, w3, registry, runlog, signer, acting, calls, payer
+        )
 
     if not entries:
         print(f"{base} contains no peer IDs")
@@ -1723,7 +1775,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.action != REGISTER:
         return run_state_action(args, network, w3, registry, runlog, signer,
-                                acting, entries, log_path, calls)
+                                acting, entries, log_path, calls, payer)
 
     # Filter first, then name: numbers are handed out from the first unused
     # value, so naming peers that are about to be skipped would burn them.
@@ -1767,13 +1819,13 @@ def main(argv: list[str] | None = None) -> int:
         print("nothing to register")
         return 0
 
-    funds = check_funds(registry, len(work))
+    funds = check_funds(registry, len(work), dry_run=args.dry_run)
     decimals = read_rpc(registry.token_decimals, what="token decimals read")
     # register() reverts while the allowance is missing, so do not ask.
     gas, gas_basis = gas_limit_for(registry, work, estimate=not funds.needs_approval)
     fees = read_rpc(current_fees, w3, what="fee read")
     eth = check_eth(
-        w3, owner, gas, fees, len(work), funds.needs_approval
+        w3, payer, gas, fees, len(work), funds.needs_approval
     )
 
     print(f"bond:        {format_units(funds.bond, decimals)} SQD each")
@@ -1783,7 +1835,7 @@ def main(argv: list[str] | None = None) -> int:
         f"gas:         ~{format_units(eth.required, 18)} ETH max"
         f"{GAS_BASIS_NOTE[gas_basis]}"
     )
-    print(f"ETH balance: {format_units(eth.balance, 18)} ETH")
+    print(f"ETH balance: {format_units(eth.balance, 18)} ETH ({payer})")
     if funds.needs_approval:
         print(
             f"approval:    needed — allowance is "
@@ -1794,10 +1846,11 @@ def main(argv: list[str] | None = None) -> int:
     # After the plan, so the shortfall is read in context. Applies to dry runs
     # too: finding this before sending is the whole point of the pre-check.
     if not eth.sufficient:
-        fail(
+        shortfall(
             f"insufficient ETH for gas: need up to "
             f"{format_units(eth.required, 18)} ETH to cover {len(work)} "
-            f"transaction(s), hold {format_units(eth.balance, 18)} ETH"
+            f"transaction(s), hold {format_units(eth.balance, 18)} ETH",
+            args.dry_run,
         )
 
     if args.dry_run:

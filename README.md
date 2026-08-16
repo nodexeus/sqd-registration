@@ -85,6 +85,15 @@ regenerated from the run log each time rather than appended to, so it cannot
 drift out of sync, and it is the record to hand over when the job is done. A
 dry run does not write it: the file asserts that these nodes are registered.
 
+A dry run needs no credential when it can already tell whose position to
+report — from `--address`, `--via-vesting`, or the workers themselves. It also
+reports funding problems as `SHORTFALL:` lines rather than stopping, and always
+exits 0, so it can be looped over many files. A real run refuses.
+
+Note that gas is paid by whoever *signs*, which through a vesting contract is
+the beneficiary rather than the contract. The ETH balance shown names the
+account it belongs to.
+
 Always `--dry-run` first. It reports the bond total, the estimated gas, whether
 an approval is needed, and exactly which peer IDs would be registered under
 which names.

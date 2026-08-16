@@ -76,7 +76,19 @@ Look first:
     ./sqd batches/peers-03-eoa-cd65B8Be-20.txt --action deregister --dry-run
 
 It reports which account must sign, how many workers are actionable, and the
-gas. Nothing is sent.
+gas. Nothing is sent, and **a dry run needs no credential at all** — the tool
+reads the workers to learn whose they are, so you can inspect every file before
+unlocking anything.
+
+A dry run reports problems rather than stopping at the first, and always exits
+0. A line beginning `SHORTFALL:` means a real run would refuse:
+
+    SHORTFALL:   insufficient ETH for gas: need up to 0.0002 ETH, hold 0 ETH
+
+Expect it to take a while. Each worker costs two or three chain reads, roughly
+a second each against a public endpoint — so about 25 seconds for the 20-worker
+file and five minutes for the 275-worker one. A private RPC endpoint passed with
+`--rpc-url` is markedly faster, and worth using for the real runs.
 
 Then run it without `--dry-run`. You will be asked for that account's
 credential, then to confirm.
@@ -111,7 +123,8 @@ Rewards are claimed per account rather than per worker, so each account is a
 single transaction regardless of how many workers it holds.
 
 `claim` needs no peer ID file at all — it sweeps every worker the account owns
-in one transaction. Check what is owed with a dry run, which sends nothing:
+in one transaction. Check what is owed with a dry run, which sends nothing and
+needs no credential:
 
     ./sqd --action claim --dry-run
 
