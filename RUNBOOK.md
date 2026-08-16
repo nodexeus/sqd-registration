@@ -63,17 +63,17 @@ Dry runs need no credential at all, so the whole pre-flight works regardless.
 
 | File | Workers | Signed by |
 | --- | --- | --- |
-| `peers-01-eoa-5CF5A099-275.txt` | 275 | `0x5CF5A099…54c41b` |
-| `peers-02-eoa-43d6A791-65.txt` | 65 | `0x43d6A791…D8478f` |
-| `peers-03-eoa-cd65B8Be-20.txt` | 20 | `0xcd65B8Be…037aD3` |
-| `peers-04-eoa-dADB8013-1.txt` | 1 | `0xdADB8013…089744` |
-| `peers-05-vesting-A205c6e3-188.txt` | 188 | `0xA205c6e3…7f27F3` |
+| `peers-01-eoa-cd65B8Be-20.txt` | 20 | `0xcd65B8Be…037aD3` |
+| `peers-02-eoa-dADB8013-1.txt` | 1 | `0xdADB8013…089744` |
+| `peers-03-eoa-5CF5A099-275.txt` | 275 | `0x5CF5A099…54c41b` |
+| `peers-04-eoa-43d6A791-65.txt` | 65 | `0x43d6A791…D8478f` |
+| `peers-05-vesting-5CF5A099-10.txt` | 10 | `0x5CF5A099…54c41b` |
 | `peers-06-vesting-80c88d21-130.txt` | 130 | `0x80c88d21…4B9aAd` |
 | `peers-07-vesting-678d14c7-100.txt` | 100 | `0x678d14c7…9D1942` |
 | `peers-08-vesting-2aA9ADb8-100.txt` | 100 | `0x2aA9ADb8…983751` |
 | `peers-09-vesting-51FF3579-61.txt` | 61 | `0x51FF3579…92b629` |
 | `peers-10-vesting-dADB8013-49.txt` | 49 | `0xdADB8013…089744` |
-| `peers-11-vesting-5CF5A099-10.txt` | 10 | `0x5CF5A099…54c41b` |
+| `peers-11-vesting-A205c6e3-188.txt` | 188 | `0xA205c6e3…7f27F3` |
 
 Nine accounts, eleven files: three accounts appear twice, once holding workers
 directly and once as the owner of a vesting contract. Same key, two runs.
@@ -110,12 +110,12 @@ file and five minutes for the 275-worker one. A private RPC endpoint passed with
 Then run it without `--dry-run`. You will be asked for that account's
 credential, then to confirm.
 
-**Start with `peers-03` (20 workers).** It is small enough to check afterwards
+**Start with `peers-01` (20 workers).** It is small enough to check afterwards
 and simple enough that a problem is unambiguous. Then work down the list.
 
 After each run:
 
-    ./sqd batches/peers-03-eoa-cd65B8Be-20.txt --action status --address <that account>
+    ./sqd batches/peers-01-eoa-cd65B8Be-20.txt --action status --address <that account>
 
 Every worker in the file should read `deregistering`. That means the call
 landed; the worker keeps running until the epoch ends.
@@ -144,7 +144,7 @@ peer IDs — it sweeps every worker the account owns in one transaction — but 
 file tells it whose rewards to claim, so no address or contract has to be looked
 up:
 
-    ./sqd batches/peers-01-eoa-5CF5A099-275.txt --action claim --dry-run
+    ./sqd batches/peers-03-eoa-5CF5A099-275.txt --action claim --dry-run
 
     registered by: 0x5CF5A099A9089b31689B16cd83d06b6ce154c41b
     claimable:     35005.34 SQD
@@ -203,9 +203,9 @@ begins** — about 20 minutes. It is not earning yet and the run has not failed.
 
 ### Naming
 
-By default each node is given a generated name, plus a website and description.
+By default each run is batched to 50 nodes per group and each node group is assigned a random basename then each node is assigned the name `basename-<last 6 of peer_id>` (example: `garnet-BFJnLd`), plus a website and description.
 To use your own names, put them in the file as `peer_id,name`. To apply a
-pattern, use `--name-template 'yourprefix-{n:03d}'`. To register with a name
+pattern, use `--name-template 'yourprefix-{n:1d}'`. To register with a name
 only and no website or description:
 
     ./sqd new_peer_ids.txt --website '' --description ''
