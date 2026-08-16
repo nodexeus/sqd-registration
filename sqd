@@ -50,19 +50,26 @@ print(NETWORKS[name].chain_id)
 PYEOF
 )"
 
-proxy="$here/node_modules/.bin/fireblocks-json-rpc"
+# Overridable so the wrapper's argument handling can be tested without a real
+# Fireblocks workspace.
+proxy="${SQD_PROXY:-$here/node_modules/.bin/fireblocks-json-rpc}"
 if [[ ! -x "$proxy" ]]; then
   echo "error: the Fireblocks proxy is not installed. Run:" >&2
   echo "         npm install @fireblocks/fireblocks-json-rpc" >&2
   exit 2
 fi
 
-# Only add --signer if the caller did not; passing it twice is harmless to
-# argparse but reads like a bug in the echoed command line.
-signer_args=(--signer fireblocks)
-for arg in "$@"; do
-  [[ "$arg" == "--signer" || "$arg" == --signer=* ]] && signer_args=()
-done
+# Build the command up rather than conditionally emptying an array: bash 3.2,
+# which macOS still ships, treats "${empty[@]}" as an unbound variable
+# under `set -u`.
+cmd=("$py" "$here/bulk_register.py")
 
-exec "$proxy" --chainId "$chain_id" -- \
-  "$py" "$here/bulk_register.py" "${signer_args[@]}" "$@"
+# Only add --signer if the caller did not. Passing it twice is harmless to
+# argparse but reads like a bug in the echoed command line.
+add_signer=1
+for arg in "$@"; do
+  [[ "$arg" == "--signer" || "$arg" == --signer=* ]] && add_signer=0
+done
+[[ "$add_signer" -eq 1 ]] && cmd+=(--signer fireblocks)
+
+exec "$proxy" --chainId "$chain_id" -- "${cmd[@]}" "$@"
