@@ -324,3 +324,37 @@ def test_env_credentials_still_win_over_prompting(monkeypatch):
     )
 
     assert bulk_register.load_signer().address.startswith("0x")
+
+
+def test_an_rpc_error_response_does_not_blame_the_connection(capsys):
+    """A proxy relays its upstream's failures, which read as if the proxy were
+    at fault. Ankr's 'you must authenticate' arrived this way."""
+    from web3.exceptions import Web3RPCError
+
+    w3 = MagicMock()
+    type(w3.eth).chain_id = property(
+        lambda _self: (_ for _ in ()).throw(
+            Web3RPCError("Unauthorized: You must authenticate your request")
+        )
+    )
+    with patch.object(bulk_register, "Web3", return_value=w3):
+        with pytest.raises(SystemExit) as exc:
+            bulk_register.connect(NETWORKS["mainnet"], "/tmp/proxy.ipc")
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "answered with an error" in err
+    assert "cannot reach" not in err
+    assert "upstream" in err
+
+
+def test_a_genuine_connection_failure_still_says_unreachable(capsys):
+    w3 = MagicMock()
+    type(w3.eth).chain_id = property(
+        lambda _self: (_ for _ in ()).throw(ConnectionError("refused"))
+    )
+    with patch.object(bulk_register, "Web3", return_value=w3):
+        with pytest.raises(SystemExit):
+            bulk_register.connect(NETWORKS["mainnet"], "http://nope")
+
+    assert "cannot reach" in capsys.readouterr().err

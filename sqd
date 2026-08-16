@@ -42,15 +42,23 @@ if [[ -z "${FIREBLOCKS_API_KEY:-}" ]]; then
   exec "$py" "$here/bulk_register.py" "$@"
 fi
 
-chain_id="$("$py" - "$network" <<'PYEOF'
+# Both the chain id and the RPC URL come from the same table the script uses.
+# Passing --rpcUrl matters: given only --chainId the proxy picks its own default
+# endpoint for that chain, which has been an Ankr URL that now rejects
+# unauthenticated requests. Supplying it explicitly also means the proxy and the
+# script read the same node.
+net_info="$("$py" - "$network" <<'PYEOF'
 import sys
 from sqdreg.networks import NETWORKS
 name = sys.argv[1]
 if name not in NETWORKS:
     sys.exit(f"error: unknown --network {name!r}")
-print(NETWORKS[name].chain_id)
+print(NETWORKS[name].chain_id, NETWORKS[name].rpc_url)
 PYEOF
 )"
+chain_id="${net_info%% *}"
+proxy_rpc_url="${net_info##* }"
+
 
 # Overridable so the wrapper's argument handling can be tested without a real
 # Fireblocks workspace.
@@ -74,4 +82,4 @@ for arg in "$@"; do
 done
 [[ "$add_signer" -eq 1 ]] && cmd+=(--signer fireblocks)
 
-exec "$proxy" --chainId "$chain_id" -- "${cmd[@]}" "$@"
+exec "$proxy" --chainId "$chain_id" --rpcUrl "$proxy_rpc_url" -- "${cmd[@]}" "$@"

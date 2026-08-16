@@ -516,7 +516,21 @@ def connect(network, rpc_url: str) -> Web3:
     try:
         chain_id = w3.eth.chain_id
     except Exception as exc:
-        fail(f"cannot reach RPC endpoint {endpoint}: {exc}")
+        # An error *response* means something answered, so blaming the endpoint
+        # for being unreachable misdirects. A signing proxy in particular
+        # relays failures from whatever node it talks to, and those read as if
+        # the proxy itself were at fault.
+        if is_transport_error(exc):
+            fail(f"cannot reach RPC endpoint {endpoint}: {exc}")
+        fail(
+            f"the RPC endpoint {endpoint} answered with an error: {exc}\n"
+            "       Something is listening, so this is the node's complaint "
+            "rather than a connection\n"
+            "       problem. Behind a signing proxy it is usually the node the "
+            "proxy talks to, not the\n"
+            "       proxy itself — check what the proxy was told to use "
+            "upstream."
+        )
     if chain_id != network.chain_id:
         fail(
             f"RPC reports chain {chain_id}, but network {network.name} "

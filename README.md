@@ -369,6 +369,12 @@ Fireblocks holds keys as MPC shares and **cannot export a private key**, so
         .venv/bin/python bulk_register.py peer_ids.txt \
             --signer fireblocks --network tethys --action status
 
+`./sqd` passes the proxy an explicit `--rpcUrl` as well as `--chainId`. That
+matters: given only a chain id the proxy chooses its own default node for that
+chain, which has been an Ankr endpoint that now rejects unauthenticated
+requests. Its complaint arrives relayed through the proxy and reads as though
+the proxy itself were at fault.
+
 The proxy exports its listening address to the wrapped command as
 `FIREBLOCKS_JSON_RPC_ADDRESS`, and `--signer fireblocks` reads it, so no
 `--rpc-url` is needed. Do not write `--rpc-url $FIREBLOCKS_JSON_RPC_ADDRESS`

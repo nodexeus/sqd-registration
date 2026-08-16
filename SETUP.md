@@ -9,7 +9,8 @@ One-time setup for running `bulk_register.py`. Takes about ten minutes.
   usually 3.9, so invoke a newer one explicitly.
 - **Node 18 or newer** — only if any account is held in Fireblocks.
 - An RPC endpoint. The defaults are the public Arbitrum ones, which are fine at
-  this scale; `--rpc-url` overrides them.
+  this scale; `--rpc-url` overrides them. With Fireblocks, `./sqd` also hands
+  the same endpoint to the signing proxy, so both read the same node.
 
 ## Install
 
