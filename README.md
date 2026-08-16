@@ -372,7 +372,6 @@ Fireblocks holds keys as MPC shares and **cannot export a private key**, so
     export FIREBLOCKS_API_KEY=<uuid>
     export FIREBLOCKS_API_PRIVATE_KEY_PATH=/path/to/fireblocks_secret.key
     export FIREBLOCKS_API_BASE_URL=https://sandbox-api.fireblocks.io   # sandbox
-    export FIREBLOCKS_VAULT_ACCOUNT_IDS=0
 
     fireblocks-json-rpc --chainId 421614 -- \
         .venv/bin/python bulk_register.py peer_ids.txt \

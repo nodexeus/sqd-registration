@@ -60,7 +60,7 @@ From your Fireblocks administrator:
 | An **API user** allowed to initiate transactions | The tool authenticates as this user |
 | Its **API key** (a UUID) | Identifies that user |
 | Its **RSA private key** file | Signs API requests. Generated when the API user is created |
-| The **vault account ID**, or several | Which accounts to act as. The first is `0`, not `1`. `FIREBLOCKS_VAULT_ACCOUNT_IDS` takes a comma-separated list |
+| Nothing about vault accounts | They are discovered automatically — see below |
 
 The vault account also needs the chain's native asset enabled — **ETH on
 Arbitrum One** — or the tool cannot see an address to act as.
@@ -77,14 +77,27 @@ through Fireblocks. It is gitignored, and so is `*.key`.
 run skips Fireblocks entirely. There is no need to create and delete the file
 between phases.
 
-**If several accounts are in Fireblocks, list every vault account ID.** The
-tool works out which account a given run needs and picks that one, so a job
-spanning many accounts is configured once rather than steered by hand:
+**You do not need to know which vault accounts you have.** Leave
+`FIREBLOCKS_VAULT_ACCOUNT_IDS` commented out and every vault account holding
+the asset is found automatically, in a single API call. Each run then selects
+whichever of them it needs. Accounts without the asset are skipped quietly.
 
-    FIREBLOCKS_VAULT_ACCOUNT_IDS=0,1,4,7
+Set the variable only to deliberately restrict a run to certain accounts. It is
+easy to get wrong and rarely worth it: **every id listed must exist and hold the
+asset**, and one that does not aborts the entire run, including the valid
+accounts beside it —
 
-If a run needs an account the workspace does not hold, it says so and points at
-`--signer local`.
+    Failed to populate accounts: No ETH-AETH asset wallet found for
+    vault account with id 0
+
+Ids are also 0-based, so the first account is `0`. Listing ids costs about
+0.2 s each as well, checked one at a time, where discovery is one flat call.
+
+If a run needs an account the workspace does not hold at all, the tool says so
+and points at `--signer local`.
+
+Discovery reads the first 20 vault accounts holding the asset. Past that, list
+the ids you need explicitly.
 
 > **Those credentials are signing authority.** An API key plus its RSA key,
 > combined with a policy that approves these calls, can move funds from that
