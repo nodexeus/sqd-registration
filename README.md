@@ -519,3 +519,35 @@ Each record stores which action produced it, so a successful deregistration
 never makes a later `register` run skip that peer ID. Records written before the
 field existed read as registrations. Each action writes its own CSV:
 `registered.csv`, `deregistered.csv`, `withdrawn.csv`.
+
+## Who registered a worker
+
+`tools/owners.py` reports, for each peer ID in a file, the account that
+registered it and whether that account is a wallet or a contract. Read-only: no
+credential, nothing sent.
+
+    .venv/bin/python tools/owners.py peer_ids.txt --network mainnet --csv owners.csv
+
+    worker  kind         creator                                     controller
+      1722  vesting      0xec6E0dBf...06b63D                         0x80c88d21...4B9aAd
+      4036  contract     0x18dE9B28...188FcDF
+      4254  eoa          0x5CF5A099...154c41b                         0x5CF5A099...154c41b
+
+This matters because `deregister()` and `withdraw()` both require
+`worker.creator == msg.sender`:
+
+| kind | What it means for deregistering |
+| --- | --- |
+| `eoa` | The wallet can call `deregister` / `withdraw` directly |
+| `vesting` | The **contract** is the creator, so calls must go through its `execute()`, driven by the beneficiary shown as `controller` |
+| `contract` | A contract that is not a SubsquidVesting — a Safe, say. Needs whatever mechanism that contract provides |
+| `withdrawn` | Already withdrawn; `withdraw()` zeroes the creator |
+
+Vesting registration is common on mainnet: a 400-worker sample had 232 of them
+registered by a vesting contract rather than a wallet. Run this before planning
+a bulk deregistration, because the answer decides the whole approach.
+
+Classification uses three independent signals — bytecode present at the creator,
+`owner()`/`beneficiary()` matching the indexer's `realOwner`, and
+vesting-specific fields such as `expectedTotalAmount` — so an unrecognised
+contract is reported as `contract` rather than guessed at.
