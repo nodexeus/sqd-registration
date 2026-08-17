@@ -23,6 +23,7 @@ import argparse
 import csv
 import datetime as dt
 import os
+import collections
 import statistics
 import sys
 from collections import defaultdict
@@ -30,6 +31,7 @@ from collections import defaultdict
 # Run from anywhere: this lives one level below the package it imports.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import base58
 from web3 import Web3
 
 from sqdreg.networks import NETWORKS
@@ -152,6 +154,61 @@ def assess(worker_id, history, epochs, period):
             "zeros": zeros, "missed": missed, "appearances": len(seen)}
 
 
+def worker_details_for(w3, network, worker_ids, progress=None):
+    """{worker_id: (peer_id, creator)} for any worker, including strangers'.
+
+    getWorker() carries the peer ID as the same identity multihash the input
+    file uses, so base58 gives the string back. Batched, because a network-wide
+    event can put a few hundred workers in the same state.
+    """
+    from tools.delegation import MULTICALL3, MULTICALL3_ABI
+
+    registration = w3.to_checksum_address(network.worker_registration)
+    contract = Registry(w3, network, "0x" + "0" * 40).contract
+    worker_ids = list(worker_ids)
+
+    def decode(data):
+        worker = w3.codec.decode(
+            ["(address,bytes,uint256,uint128,uint128,string)"], data
+        )[0]
+        return worker[1], worker[0]          # peerId bytes, creator
+
+    out = {}
+    if len(w3.eth.get_code(w3.to_checksum_address(MULTICALL3))) <= 2:
+        for worker_id in worker_ids:
+            worker = contract.functions.getWorker(worker_id).call()
+            out[worker_id] = (worker[1], worker[0])
+    else:
+        multicall = w3.eth.contract(
+            address=w3.to_checksum_address(MULTICALL3), abi=MULTICALL3_ABI
+        )
+        for start in range(0, len(worker_ids), 250):
+            chunk = worker_ids[start:start + 250]
+            calls = [
+                (registration, False, contract.encode_abi("getWorker", args=[w]))
+                for w in chunk
+            ]
+            for worker_id, (ok, data) in zip(
+                chunk, multicall.functions.aggregate3(calls).call()
+            ):
+                out[worker_id] = decode(data) if ok else (b"", "")
+            if progress:
+                progress("named", len(out), len(worker_ids))
+    return {
+        worker_id: (base58.b58encode(raw).decode() if raw else "?", creator)
+        for worker_id, (raw, creator) in out.items()
+    }
+
+
+def cohort_members(history, epochs, period, slot, verdicts, states):
+    """Every worker sharing this slot whose state is in `states`."""
+    return sorted(
+        w for w, seen in history.items()
+        if period and seen and min(seen) % period == slot
+        and verdicts[w]["state"] in states
+    )
+
+
 def cohort_state(history, epochs, period, slot, verdicts):
     """How many workers share this slot, and how many are in the same trouble.
 
@@ -173,6 +230,9 @@ def main(argv=None):
     parser.add_argument("--network", choices=sorted(NETWORKS), default="mainnet")
     parser.add_argument("--days", type=float, default=4.0,
                         help="how much reward history to read (default 4)")
+    parser.add_argument("--cohort", action="store_true",
+                        help="list every worker sharing the state, including "
+                             "other operators' -- what a network-side report needs")
     parser.add_argument("--csv", help="also write a per-peer CSV here")
     args = parser.parse_args(argv)
 
@@ -253,6 +313,7 @@ def main(argv=None):
               f"(~{period * L1_BLOCK_SECONDS / 3600:.0f}h)\n")
 
     rows = []
+    affected_slots = {}          # slot -> set of states seen among the input
     for entry in entries:
         wid = worker_ids[entry.peer_id]
         if not wid:
@@ -304,6 +365,9 @@ def main(argv=None):
             print(f"  status:        NOT EARNING — {detail}")
             print(f"  cohort:        {unwell} of {members} workers in this "
                   f"rotation slot are in the same state")
+            # Not v["state"]: the cohort count above spans every not-earning
+            # state, and a list that showed fewer would read as a discrepancy.
+            affected_slots.setdefault(v["slot"], set()).update({ZEROED, DROPPED})
             share = unwell / members if members else 0
             if share > 0.02:
                 print("  reading:       the cohort went out together, so this "
@@ -322,6 +386,53 @@ def main(argv=None):
             f"{days_since(v['last_paid']):.2f}" if v["last_paid"] else "",
             f"{unwell}/{members}",
         ))
+
+    if args.cohort and affected_slots:
+        my_creators = {
+            c.lower() for c in (
+                worker_details_for(w3, network, [w for w in ids if w])[w][1]
+                for w in ids if w
+            )
+        }
+        print("\ncohort detail — every worker sharing these states.")
+        print("  \"yours\" means it shares a registering account with "
+              "something you passed in,\n  so pass the whole fleet to label "
+              "all of it.")
+        for slot in sorted(affected_slots):
+            members = cohort_members(
+                history, epochs, period, slot, verdicts, affected_slots[slot]
+            )
+            detail = worker_details_for(w3, network, members)
+            print(f"\n  rotation slot {slot} — {len(members)} worker(s):")
+            for worker_id in members:
+                v = verdicts[worker_id]
+                stamp = (
+                    f"last earned {when(v['last_paid']):%Y-%m-%d %H:%M} UTC "
+                    f"({days_since(v['last_paid']):.1f}d)"
+                    if v["last_paid"] else "never earned in window"
+                )
+                peer_id, creator = detail[worker_id]
+                whose = "yours" if creator.lower() in my_creators else "other"
+                print(f"    {peer_id}  worker {worker_id:<6} {whose:<6} "
+                      f"{v['state']:<24} {stamp}")
+        # A shared last-earned timestamp is the evidence that this was one
+        # event rather than a coincidence, so make it impossible to miss.
+        stamps = collections.Counter(
+            verdicts[w]["last_paid"]
+            for slot in affected_slots
+            for w in cohort_members(
+                history, epochs, period, slot, verdicts, affected_slots[slot]
+            )
+            if verdicts[w]["last_paid"]
+        )
+        if stamps:
+            block, count = stamps.most_common(1)[0]
+            if count > 2:
+                print(f"\n  {count} of them last earned in the same period "
+                      f"(L1 {block}, {when(block):%Y-%m-%d %H:%M} UTC).")
+                print("  A shared cutoff across separate accounts is one "
+                      "event, not independent\n  node failures — that is the "
+                      "part worth reporting.")
 
     if len(entries) > 1:
         counts = {}

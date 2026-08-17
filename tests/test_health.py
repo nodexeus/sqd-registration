@@ -112,3 +112,35 @@ def test_a_cohort_wide_outage_is_distinguished_from_a_lone_failure():
 
     assert (members, unwell) == (2, 2)          # the whole cohort is out
     assert verdicts[2]["state"] == health.EARNING
+
+
+def test_cohort_members_lists_only_the_requested_states():
+    """The count printed above the list and the list itself must agree, or it
+    reads as a discrepancy in the evidence."""
+    data = {}
+    for i in range(8):
+        block = 1000 + i * 600
+        if i % 4 == 0:
+            # 1 stops dead, 5 is paid zero, 6 keeps earning -- same slot.
+            data[block] = {1: 10 if i == 0 else 0,
+                           5: 10 if i < 4 else 0,
+                           6: 10}
+        else:
+            data[block] = {2 + (i % 3): 10}
+    epochs = epochs_from(data)
+    history = health.build_history(epochs)
+    period = health.rotation_period(epochs, history)
+    verdicts = {w: health.assess(w, history, epochs, period) for w in history}
+    slot = verdicts[1]["slot"]
+
+    both = health.cohort_members(
+        history, epochs, period, slot, verdicts,
+        {health.ZEROED, health.DROPPED},
+    )
+    members, unwell = health.cohort_state(
+        history, epochs, period, slot, verdicts
+    )
+
+    assert both == [1, 5]              # 6 is earning, so excluded
+    assert unwell == len(both)         # the count matches what gets listed
+    assert verdicts[6]["state"] == health.EARNING
