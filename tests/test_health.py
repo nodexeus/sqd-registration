@@ -144,3 +144,53 @@ def test_cohort_members_lists_only_the_requested_states():
     assert both == [1, 5]              # 6 is earning, so excluded
     assert unwell == len(both)         # the count matches what gets listed
     assert verdicts[6]["state"] == health.EARNING
+
+
+def test_workers_that_stopped_at_different_times_are_not_one_event():
+    """The defect this replaces: counting how many workers share a state and
+    concluding they went out together. Workers drop out continuously, so a slot
+    accumulates unrelated casualties."""
+    data = {}
+    for i in range(12):
+        block = 1000 + i * 600
+        if i % 4 == 0:
+            paid = {}
+            # 1 stops after its first turn, 5 keeps going until much later.
+            paid[1] = 10 if i == 0 else 0
+            paid[5] = 10 if i < 8 else 0
+            data[block] = paid
+        else:
+            data[block] = {2: 10}
+    epochs = epochs_from(data)
+    history = health.build_history(epochs)
+    period = health.rotation_period(epochs, history)
+    verdicts = {w: health.assess(w, history, epochs, period) for w in history}
+
+    groups = health.cutoff_groups(history, epochs, period,
+                                  verdicts[1]["slot"], verdicts)
+
+    # Both are not earning, but they stopped in different periods.
+    assert sorted(len(g) for g in groups.values()) == [1, 1]
+    assert len(groups) == 2
+    assert groups[verdicts[1]["last_paid"]] == [1]
+
+
+def test_workers_that_stopped_in_the_same_period_group_together():
+    """The signal that does mean something: one cutoff, several workers."""
+    data = {}
+    for i in range(12):
+        block = 1000 + i * 600
+        if i % 4 == 0:
+            data[block] = {w: (10 if i == 0 else 0) for w in (1, 5, 7)}
+        else:
+            data[block] = {2: 10}
+    epochs = epochs_from(data)
+    history = health.build_history(epochs)
+    period = health.rotation_period(epochs, history)
+    verdicts = {w: health.assess(w, history, epochs, period) for w in history}
+
+    groups = health.cutoff_groups(history, epochs, period,
+                                  verdicts[1]["slot"], verdicts)
+
+    assert len(groups) == 1
+    assert groups[1000] == [1, 5, 7]

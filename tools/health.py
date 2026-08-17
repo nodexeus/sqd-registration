@@ -17,6 +17,15 @@ the same time.
 Not earning for a few days is not necessarily a fault. Workers do rejoin after
 a cohort-wide event, sometimes days later, so the duration and the cohort
 context matter more than the fact of a zero.
+
+Workers also drop out continuously, so the number in a slot that are not
+earning is not evidence of anything on its own -- a slot accumulates unrelated
+casualties. What identifies one event is a group that stopped in the SAME
+period across registering accounts with nothing to do with each other, which is
+what the report keys on.
+
+Use --days 8 or more for that. A short window hides workers that stopped before
+it starts, and those are exactly the ones already down.
 """
 
 import argparse
@@ -209,6 +218,21 @@ def cohort_members(history, epochs, period, slot, verdicts, states):
     )
 
 
+def cutoff_groups(history, epochs, period, slot, verdicts):
+    """{last_paid_block: [worker_id, ...]} for the slot's not-earning members.
+
+    Counting how many workers share a state says nothing about whether they
+    stopped together -- workers drop out continuously, so a slot accumulates
+    unrelated casualties. Only a shared cutoff is evidence of one event.
+    """
+    groups = defaultdict(list)
+    for worker_id in cohort_members(
+        history, epochs, period, slot, verdicts, {ZEROED, DROPPED}
+    ):
+        groups[verdicts[worker_id]["last_paid"]].append(worker_id)
+    return groups
+
+
 def cohort_state(history, epochs, period, slot, verdicts):
     """How many workers share this slot, and how many are in the same trouble.
 
@@ -228,8 +252,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("peer_ids", help="a peer ID file, or a single peer ID")
     parser.add_argument("--network", choices=sorted(NETWORKS), default="mainnet")
-    parser.add_argument("--days", type=float, default=4.0,
-                        help="how much reward history to read (default 4)")
+    parser.add_argument("--days", type=float, default=8.0,
+                        help="how much reward history to read (default 8). "
+                             "A shorter window hides workers that stopped "
+                             "before it starts.")
     parser.add_argument("--cohort", action="store_true",
                         help="list every worker sharing the state, including "
                              "other operators' -- what a network-side report needs")
@@ -364,20 +390,45 @@ def main(argv=None):
                 detail += f", then dropped from the last {v['missed']} payout(s)"
             print(f"  status:        NOT EARNING — {detail}")
             print(f"  cohort:        {unwell} of {members} workers in this "
-                  f"rotation slot are in the same state")
-            # Not v["state"]: the cohort count above spans every not-earning
-            # state, and a list that showed fewer would read as a discrepancy.
+                  f"rotation slot are not earning")
             affected_slots.setdefault(v["slot"], set()).update({ZEROED, DROPPED})
-            share = unwell / members if members else 0
-            if share > 0.02:
-                print("  reading:       the cohort went out together, so this "
-                      "is a network-side\n                 event rather than "
-                      "this node. Workers do rejoin, sometimes\n"
-                      "                 after several days.")
+
+            # Workers drop out continuously, so a slot accumulates unrelated
+            # casualties. What distinguishes an incident from background churn
+            # is a group that stopped in the SAME period, across accounts that
+            # have nothing to do with each other.
+            groups = cutoff_groups(history, epochs, period, v["slot"], verdicts)
+            peers = [w for w in groups.get(v["last_paid"], []) if w != wid]
+            if v["last_paid"] and len(groups) > 1:
+                spread = ", ".join(
+                    f"{len(g)}@{when(b):%m-%d %H:%M}" if b else f"{len(g)}@never"
+                    for b, g in sorted(groups.items(), key=lambda kv: kv[0] or 0)
+                )
+                print(f"  when they went: {spread}")
+            if peers:
+                owners = {
+                    c.lower() for _, c in worker_details_for(
+                        w3, network, peers + [wid]
+                    ).values()
+                }
+                print(f"  same cutoff:   {len(peers)} other worker(s) stopped "
+                      f"in this same period,\n                 across "
+                      f"{len(owners)} distinct registering account(s)")
+                if len(owners) > 1:
+                    print("  reading:       a shared cutoff across unrelated "
+                          "accounts is a network-side\n                 event, "
+                          "not this node. Workers do rejoin, sometimes after\n"
+                          "                 several days.")
+                else:
+                    print("  reading:       they stopped together but all "
+                          "belong to one account, so a\n                 "
+                          "shared cause on your side is not ruled out.")
             else:
-                print("  reading:       this node stopped while its cohort "
-                      "kept earning, so it\n                 is worth looking "
-                      "at the node itself.")
+                print("  same cutoff:   no other worker in this slot stopped "
+                      "in that period")
+                print("  reading:       it stopped alone while the rest of its "
+                      "cohort carried on,\n                 so the node itself "
+                      "is worth checking.")
             print()
 
         rows.append((
