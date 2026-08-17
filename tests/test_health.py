@@ -108,9 +108,11 @@ def test_a_cohort_wide_outage_is_distinguished_from_a_lone_failure():
     verdicts = {w: health.assess(w, history, epochs, period) for w in history}
 
     slot = verdicts[1]["slot"]
-    members, unwell = health.cohort_state(history, epochs, period, slot, verdicts)
+    serving, unwell, retired = health.cohort_state(
+        history, epochs, period, slot, verdicts
+    )
 
-    assert (members, unwell) == (2, 2)          # the whole cohort is out
+    assert (serving, unwell, retired) == (2, 2, 0)   # the whole cohort is out
     assert verdicts[2]["state"] == health.EARNING
 
 
@@ -137,7 +139,7 @@ def test_cohort_members_lists_only_the_requested_states():
         history, epochs, period, slot, verdicts,
         {health.ZEROED, health.DROPPED},
     )
-    members, unwell = health.cohort_state(
+    serving, unwell, retired = health.cohort_state(
         history, epochs, period, slot, verdicts
     )
 
@@ -194,3 +196,39 @@ def test_workers_that_stopped_in_the_same_period_group_together():
 
     assert len(groups) == 1
     assert groups[1000] == [1, 5, 7]
+
+
+def test_a_deregistered_worker_is_not_counted_as_a_casualty():
+    """A deregistered worker stops earning because its operator asked it to.
+    Counting one inflates the total and, worse, puts a wrong peer ID in a
+    report sent to somebody else."""
+    data = {}
+    for i in range(12):
+        block = 1000 + i * 600
+        if i % 4 == 0:
+            # 1 broke; 9 was deregistered on purpose; 6 is fine.
+            data[block] = {1: 10 if i == 0 else 0,
+                           9: 10 if i == 0 else 0,
+                           6: 10}
+        else:
+            data[block] = {2: 10}
+    epochs = epochs_from(data)
+    history = health.build_history(epochs)
+    period = health.rotation_period(epochs, history)
+    verdicts = {w: health.assess(w, history, epochs, period) for w in history}
+    slot = verdicts[1]["slot"]
+
+    serving, unwell, retired = health.cohort_state(
+        history, epochs, period, slot, verdicts, exclude={9}
+    )
+    listed = health.cohort_members(
+        history, epochs, period, slot, verdicts,
+        {health.ZEROED, health.DROPPED}, exclude={9},
+    )
+    groups = health.cutoff_groups(
+        history, epochs, period, slot, verdicts, exclude={9}
+    )
+
+    assert (serving, unwell, retired) == (2, 1, 1)   # 9 in neither part of 2/1
+    assert listed == [1]                             # and never named
+    assert groups[1000] == [1]                       # nor treated as co-stopped

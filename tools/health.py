@@ -164,7 +164,7 @@ def assess(worker_id, history, epochs, period):
 
 
 def worker_details_for(w3, network, worker_ids, progress=None):
-    """{worker_id: (peer_id, creator)} for any worker, including strangers'.
+    """{worker_id: (peer_id, creator, deregistered_at)} for any worker.
 
     getWorker() carries the peer ID as the same identity multihash the input
     file uses, so base58 gives the string back. Batched, because a network-wide
@@ -180,13 +180,13 @@ def worker_details_for(w3, network, worker_ids, progress=None):
         worker = w3.codec.decode(
             ["(address,bytes,uint256,uint128,uint128,string)"], data
         )[0]
-        return worker[1], worker[0]          # peerId bytes, creator
+        return worker[1], worker[0], worker[4]   # peerId, creator, deregAt
 
     out = {}
     if len(w3.eth.get_code(w3.to_checksum_address(MULTICALL3))) <= 2:
         for worker_id in worker_ids:
             worker = contract.functions.getWorker(worker_id).call()
-            out[worker_id] = (worker[1], worker[0])
+            out[worker_id] = (worker[1], worker[0], worker[4])
     else:
         multicall = w3.eth.contract(
             address=w3.to_checksum_address(MULTICALL3), abi=MULTICALL3_ABI
@@ -200,25 +200,33 @@ def worker_details_for(w3, network, worker_ids, progress=None):
             for worker_id, (ok, data) in zip(
                 chunk, multicall.functions.aggregate3(calls).call()
             ):
-                out[worker_id] = decode(data) if ok else (b"", "")
+                out[worker_id] = decode(data) if ok else (b"", "", 0)
             if progress:
                 progress("named", len(out), len(worker_ids))
     return {
-        worker_id: (base58.b58encode(raw).decode() if raw else "?", creator)
-        for worker_id, (raw, creator) in out.items()
+        worker_id: (
+            base58.b58encode(raw).decode() if raw else "?", creator, dereg
+        )
+        for worker_id, (raw, creator, dereg) in out.items()
     }
 
 
-def cohort_members(history, epochs, period, slot, verdicts, states):
-    """Every worker sharing this slot whose state is in `states`."""
+def cohort_members(history, epochs, period, slot, verdicts, states,
+                   exclude=frozenset()):
+    """Every worker sharing this slot whose state is in `states`.
+
+    `exclude` carries the workers that were deregistered. A deregistered worker
+    stops earning because its operator asked it to, so counting one as a
+    casualty both inflates the number and puts a wrong name in a report.
+    """
     return sorted(
         w for w, seen in history.items()
         if period and seen and min(seen) % period == slot
-        and verdicts[w]["state"] in states
+        and verdicts[w]["state"] in states and w not in exclude
     )
 
 
-def cutoff_groups(history, epochs, period, slot, verdicts):
+def cutoff_groups(history, epochs, period, slot, verdicts, exclude=frozenset()):
     """{last_paid_block: [worker_id, ...]} for the slot's not-earning members.
 
     Counting how many workers share a state says nothing about whether they
@@ -227,25 +235,27 @@ def cutoff_groups(history, epochs, period, slot, verdicts):
     """
     groups = defaultdict(list)
     for worker_id in cohort_members(
-        history, epochs, period, slot, verdicts, {ZEROED, DROPPED}
+        history, epochs, period, slot, verdicts, {ZEROED, DROPPED}, exclude
     ):
         groups[verdicts[worker_id]["last_paid"]].append(worker_id)
     return groups
 
 
-def cohort_state(history, epochs, period, slot, verdicts):
-    """How many workers share this slot, and how many are in the same trouble.
+def cohort_state(history, epochs, period, slot, verdicts, exclude=frozenset()):
+    """(serving, not_earning, retired) for one rotation slot.
 
-    This is what separates "your node" from "the network": a worker that
-    stopped alone is a worker to go and look at, while a worker that stopped
-    alongside its whole cohort is somebody else's incident.
+    Deregistered workers are counted separately rather than folded in. They
+    stopped earning on purpose, so they belong in neither the numerator nor the
+    denominator of "how much of this cohort is in trouble".
     """
     members = [
         w for w, seen in history.items()
         if period and seen and min(seen) % period == slot
     ]
-    unwell = [w for w in members if verdicts[w]["state"] in (ZEROED, DROPPED)]
-    return len(members), len(unwell)
+    retired = [w for w in members if w in exclude]
+    serving = [w for w in members if w not in exclude]
+    unwell = [w for w in serving if verdicts[w]["state"] in (ZEROED, DROPPED)]
+    return len(serving), len(unwell), len(retired)
 
 
 def main(argv=None):
@@ -338,6 +348,24 @@ def main(argv=None):
         print(f"rotation: each worker is paid every {period} L1 blocks "
               f"(~{period * L1_BLOCK_SECONDS / 3600:.0f}h)\n")
 
+    # Registration has to be resolved before any of this is reported. A
+    # deregistered worker stops earning by design, and one counted as a
+    # casualty is a wrong name in a report to somebody else.
+    slots_of_interest = {
+        verdicts[w]["slot"] for w in ids if w and verdicts[w]["slot"] is not None
+    }
+    candidates = {w for w in ids if w}
+    for slot in slots_of_interest:
+        candidates.update(cohort_members(
+            history, epochs, period, slot, verdicts, {ZEROED, DROPPED}
+        ))
+    details = worker_details_for(w3, network, sorted(candidates))
+    retired = {w for w, (_, _, dereg) in details.items() if dereg}
+    if retired:
+        print(f"note:    {len(retired)} of the {len(candidates)} workers "
+              "examined are deregistered;\n         they stopped earning by "
+              "design and are excluded below.")
+
     rows = []
     affected_slots = {}          # slot -> set of states seen among the input
     for entry in entries:
@@ -362,8 +390,19 @@ def main(argv=None):
 
         print(f"worker {wid}  {name}")
         print(f"  registration:  "
-              f"{'DEREGISTERING' if dereg_at else 'registered'}, "
+              f"{'DEREGISTERED' if dereg_at else 'registered'}, "
               f"bond {bond / E18:,.0f} SQD")
+        if dereg_at:
+            v = verdicts.get(wid, {})
+            print(f"  deregistered at L1 block {dereg_at} "
+                  f"({when(dereg_at):%Y-%m-%d %H:%M} UTC)")
+            print("  status:        not earning because it was deregistered — "
+                  "that is the\n                 explanation, not a fault to "
+                  "chase.")
+            print()
+            rows.append((entry.peer_id, wid, "deregistered",
+                         v.get("slot", ""), v.get("last_paid") or "", "", ""))
+            continue
         if v["state"] == UNSEEN:
             print("  reward history: never appeared in this window — either "
                   "newly registered\n                  or out longer than "
@@ -379,8 +418,8 @@ def main(argv=None):
         else:
             print("  last earned:   never, in this window")
 
-        members, unwell = cohort_state(
-            history, epochs, period, v["slot"], verdicts
+        serving, unwell, retired_here = cohort_state(
+            history, epochs, period, v["slot"], verdicts, retired
         )
         if v["state"] == EARNING:
             print("  status:        earning normally\n")
@@ -389,15 +428,20 @@ def main(argv=None):
             if v["missed"]:
                 detail += f", then dropped from the last {v['missed']} payout(s)"
             print(f"  status:        NOT EARNING — {detail}")
-            print(f"  cohort:        {unwell} of {members} workers in this "
-                  f"rotation slot are not earning")
+            print(f"  cohort:        {unwell} of {serving} still-registered "
+                  f"workers in this slot are not earning")
+            if retired_here:
+                print(f"                 ({retired_here} more are deregistered "
+                      "and excluded)")
             affected_slots.setdefault(v["slot"], set()).update({ZEROED, DROPPED})
 
             # Workers drop out continuously, so a slot accumulates unrelated
             # casualties. What distinguishes an incident from background churn
             # is a group that stopped in the SAME period, across accounts that
             # have nothing to do with each other.
-            groups = cutoff_groups(history, epochs, period, v["slot"], verdicts)
+            groups = cutoff_groups(
+                history, epochs, period, v["slot"], verdicts, retired
+            )
             peers = [w for w in groups.get(v["last_paid"], []) if w != wid]
             if v["last_paid"] and len(groups) > 1:
                 spread = ", ".join(
@@ -407,9 +451,7 @@ def main(argv=None):
                 print(f"  when they went: {spread}")
             if peers:
                 owners = {
-                    c.lower() for _, c in worker_details_for(
-                        w3, network, peers + [wid]
-                    ).values()
+                    details[w][1].lower() for w in peers + [wid] if w in details
                 }
                 print(f"  same cutoff:   {len(peers)} other worker(s) stopped "
                       f"in this same period,\n                 across "
@@ -435,15 +477,12 @@ def main(argv=None):
             entry.peer_id, wid, v["state"], v["slot"],
             v["last_paid"] or "",
             f"{days_since(v['last_paid']):.2f}" if v["last_paid"] else "",
-            f"{unwell}/{members}",
+            f"{unwell}/{serving}",
         ))
 
     if args.cohort and affected_slots:
         my_creators = {
-            c.lower() for c in (
-                worker_details_for(w3, network, [w for w in ids if w])[w][1]
-                for w in ids if w
-            )
+            details[w][1].lower() for w in ids if w and w in details
         }
         print("\ncohort detail — every worker sharing these states.")
         print("  \"yours\" means it shares a registering account with "
@@ -451,9 +490,12 @@ def main(argv=None):
               "all of it.")
         for slot in sorted(affected_slots):
             members = cohort_members(
-                history, epochs, period, slot, verdicts, affected_slots[slot]
+                history, epochs, period, slot, verdicts, affected_slots[slot],
+                retired,
             )
             detail = worker_details_for(w3, network, members)
+            detail.update({w: detail.get(w, details.get(w)) for w in members
+                           if w in details})
             print(f"\n  rotation slot {slot} — {len(members)} worker(s):")
             for worker_id in members:
                 v = verdicts[worker_id]
@@ -462,7 +504,7 @@ def main(argv=None):
                     f"({days_since(v['last_paid']):.1f}d)"
                     if v["last_paid"] else "never earned in window"
                 )
-                peer_id, creator = detail[worker_id]
+                peer_id, creator, _ = detail[worker_id]
                 whose = "yours" if creator.lower() in my_creators else "other"
                 print(f"    {peer_id}  worker {worker_id:<6} {whose:<6} "
                       f"{v['state']:<24} {stamp}")
@@ -472,7 +514,8 @@ def main(argv=None):
             verdicts[w]["last_paid"]
             for slot in affected_slots
             for w in cohort_members(
-                history, epochs, period, slot, verdicts, affected_slots[slot]
+                history, epochs, period, slot, verdicts, affected_slots[slot],
+                retired,
             )
             if verdicts[w]["last_paid"]
         )
