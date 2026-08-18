@@ -185,6 +185,10 @@ class WorkerState:
     is_active: bool
     state: str
     unlock_block: int | None = None
+    # Already present in the getWorker() response, so keeping it costs no
+    # extra call. deregister and withdraw use it to name the worker they are
+    # about to act on, which is how an operator checks it is the right one.
+    metadata: str = ""
 
 
 class Registry:
@@ -256,7 +260,7 @@ class Registry:
                 state=UNREGISTERED,
             )
 
-        creator, _, bond, registered_at, deregistered_at, _ = (
+        creator, _, bond, registered_at, deregistered_at, metadata = (
             self.contract.functions.getWorker(worker_id).call()
         )
 
@@ -316,6 +320,7 @@ class Registry:
             is_active=is_active,
             state=state,
             unlock_block=unlock,
+            metadata=metadata,
         )
 
     def registration_state(self, peer_bytes: bytes, owned: set[int]) -> str:

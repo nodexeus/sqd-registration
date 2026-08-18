@@ -1,5 +1,6 @@
 """Tests for --action deregister / withdraw / status."""
 
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
@@ -637,3 +638,50 @@ def test_the_resume_hint_carries_overridden_branding():
     hint = bulk_register.resume_command(args)
 
     assert "--description 'Something else'" in hint
+
+
+# --- labelling a deregister/withdraw ----------------------------------------
+
+
+def test_a_state_action_uses_the_workers_own_name(tmp_path):
+    """It printed "12D3Koo... as emotional-BFJnLd" on a deregister. prepare()
+    generates a name when given no template, so the run announced a name the
+    worker never had, reading as if a node were being registered."""
+    entry = PeerEntry(peer_id="p1", peer_bytes=b"p1", name=None, index=1)
+    states = {"p1": state("p1", ACTIVE)}
+    states["p1"] = replace(states["p1"], metadata='{"name":"Valoria 5-14"}')
+
+    work = bulk_register.named_for_state_action([entry], states)
+
+    assert [item.name for item in work] == ["Valoria 5-14"]
+    # Nothing is written to the chain by either call.
+    assert [item.metadata for item in work] == [""]
+
+
+def test_a_worker_with_no_metadata_gets_no_invented_name(tmp_path):
+    entry = PeerEntry(peer_id="p1", peer_bytes=b"p1", name=None, index=1)
+
+    work = bulk_register.named_for_state_action(
+        [entry], {"p1": state("p1", ACTIVE)}
+    )
+
+    assert [item.name for item in work] == [None]
+
+
+def test_names_stay_matched_to_their_own_workers(tmp_path):
+    """Two workers, two names: a mix-up here would confirm a deregister against
+    the wrong node's name."""
+    entries = [
+        PeerEntry(peer_id="p1", peer_bytes=b"p1", name=None, index=1),
+        PeerEntry(peer_id="p2", peer_bytes=b"p2", name=None, index=2),
+    ]
+    states = {
+        "p1": replace(state("p1", ACTIVE), metadata='{"name":"first"}'),
+        "p2": replace(state("p2", ACTIVE), metadata='{"name":"second"}'),
+    }
+
+    work = bulk_register.named_for_state_action(entries, states)
+
+    assert [(i.entry.peer_id, i.name) for i in work] == [
+        ("p1", "first"), ("p2", "second")
+    ]

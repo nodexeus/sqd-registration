@@ -75,6 +75,7 @@ from sqdreg.naming import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_DESCRIPTION,
     DEFAULT_WEBSITE,
+    NamedPeer,
     NamingError,
     prepare,
 )
@@ -1291,7 +1292,8 @@ def register_all(
             )
             result.registered += 1
             consecutive_failures = 0
-            print(f"  registered in block {receipt['blockNumber']} ({tx_hash})")
+            print(f"  {PAST_TENSE.get(action, action)} in block "
+                  f"{receipt['blockNumber']} ({tx_hash})")
         else:
             runlog.append(
                 Record(
@@ -1317,6 +1319,48 @@ def register_all(
 
     return result
 
+
+# "{action}d" produced "deregisterd", and withdraw is irregular besides.
+PAST_TENSE = {REGISTER: "registered", DEREGISTER: "deregistered",
+              WITHDRAW: "withdrawn"}
+
+
+def named_for_state_action(work_entries, state_by_peer):
+    """Work items for deregister/withdraw, labelled with the worker's own name.
+
+    Neither call carries a name or metadata, so nothing here reaches the chain.
+    prepare() is deliberately not used: it generates a name when given no
+    template, which is right for register and wrong here -- an invented name on
+    a deregister reads as if a node were being registered. The on-chain name
+    comes free with the state that was already read.
+    """
+    return [
+        NamedPeer(
+            entry=entry,
+            name=worker_name(state_by_peer[entry.peer_id].metadata),
+            metadata="",
+        )
+        for entry in work_entries
+    ]
+
+
+def worker_name(metadata: str) -> str | None:
+    """The worker's own name, for confirming which one is being acted on.
+
+    Metadata is whatever was registered, so it may be absent, not JSON, or JSON
+    without a name. None of those is worth an error on a deregister: fall back
+    to showing no name rather than guessing.
+    """
+    if not metadata:
+        return None
+    try:
+        parsed = json.loads(metadata)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    name = parsed.get("name")
+    return name if isinstance(name, str) and name else None
 
 STATE_LABEL = {
     UNREGISTERED: "not registered",
@@ -1459,8 +1503,15 @@ def run_state_action(
             print(f"  {count:>6}  {STATE_LABEL.get(state, state)}")
         return 0
 
-    # No names and no metadata: neither call carries any.
-    work = prepare(work_entries, None, frozenset())
+    # Neither call carries a name or metadata, so nothing here is written to
+    # the chain. prepare() would invent one -- it generates a name when given no
+    # template -- and an invented name on a deregister reads as if a node were
+    # being registered. Show what the worker is actually called instead, which
+    # is how an operator confirms it is acting on the right one. Already in the
+    # WorkerState, so no extra read.
+    work = named_for_state_action(
+        work_entries, {e.peer_id: st for e, st in zip(entries, states)}
+    )
     estimate = (
         registry.estimate_deregister_gas
         if action == DEREGISTER
@@ -1518,7 +1569,8 @@ def run_state_action(
         print(f"warning: could not write {csv_path}: {exc}", file=sys.stderr)
 
     print(
-        f"\n{action}d {result.registered}, failed {result.failed}, "
+        f"\n{PAST_TENSE.get(action, action)} {result.registered}, "
+        f"failed {result.failed}, "
         f"pending {result.pending}, gas used {result.gas_used}"
     )
     if result.aborted:

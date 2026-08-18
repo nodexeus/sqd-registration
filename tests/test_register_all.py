@@ -451,3 +451,59 @@ def test_send_failure_is_logged_as_failed(tmp_path):
     assert result.failed == 1
     assert log.records()[0].status == FAILED
     assert "nonce too low" in log.records()[0].error
+
+
+def test_the_receipt_line_names_the_action_that_was_performed(tmp_path, capsys):
+    """It read "registered in block" after a deregister, which tells an
+    operator the opposite of what happened."""
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, signer, registry = make_env([1])
+    registry.build_deregister.side_effect = lambda **kw: {"nonce": kw["nonce"]}
+
+    bulk_register.register_all(
+        w3, signer, registry, work("peer-a"), log, FEES, 500_000,
+        network="tethys", action=bulk_register.DEREGISTER,
+    )
+
+    out = capsys.readouterr().out
+    assert "deregistered in block" in out
+    assert "registered in block" not in out.replace("deregistered in block", "")
+
+
+def test_a_withdraw_receipt_says_withdrawn_not_withdrawd(tmp_path, capsys):
+    log = RunLog(tmp_path / "run.jsonl")
+    w3, signer, registry = make_env([1])
+    registry.build_withdraw.side_effect = lambda **kw: {"nonce": kw["nonce"]}
+
+    bulk_register.register_all(
+        w3, signer, registry, work("peer-a"), log, FEES, 500_000,
+        network="tethys", action=bulk_register.WITHDRAW,
+    )
+
+    assert "withdrawn in block" in capsys.readouterr().out
+
+
+def test_past_tense_is_correct_for_every_action():
+    """"{action}d" gave "deregisterd", and withdraw is irregular anyway."""
+    assert bulk_register.PAST_TENSE[bulk_register.REGISTER] == "registered"
+    assert bulk_register.PAST_TENSE[bulk_register.DEREGISTER] == "deregistered"
+    assert bulk_register.PAST_TENSE[bulk_register.WITHDRAW] == "withdrawn"
+
+
+@pytest.mark.parametrize(
+    "metadata, expected",
+    [
+        ('{"name":"Valoria 5-14 SubSquid"}', "Valoria 5-14 SubSquid"),
+        ('{"name":"n","website":"https://x"}', "n"),
+        ("", None),                       # never registered any metadata
+        ("not json at all", None),        # free-text metadata
+        ('{"website":"https://x"}', None),  # metadata without a name
+        ('["a","b"]', None),              # valid JSON, wrong shape
+        ('{"name":""}', None),            # present but empty
+        ('{"name":42}', None),            # present but not a string
+    ],
+)
+def test_worker_name_survives_whatever_is_on_chain(metadata, expected):
+    """Metadata is whatever somebody registered years ago. None of these shapes
+    is worth crashing a deregister over."""
+    assert bulk_register.worker_name(metadata) == expected
