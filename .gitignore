@@ -29,3 +29,5 @@ owners.csv
 batches/
 .DS_Store
 .gstack/
+peer_ids.txt
+*.zip
