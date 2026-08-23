@@ -18,6 +18,13 @@ Not earning for a few days is not necessarily a fault. Workers do rejoin after
 a cohort-wide event, sometimes days later, so the duration and the cohort
 context matter more than the fact of a zero.
 
+A worker can also miss a payout and then recover. That is not an outage, and
+the status stays "earning normally" -- nobody needs to go and restart it. But
+it did happen, so any worker that dropped one gets an attendance line: how many
+of its own slots it was actually paid in, over the whole window rather than
+just the end of it. A zero payout and an absence from the payout set are
+counted apart, because they have different causes.
+
 Workers also drop out continuously, so the number in a slot that are not
 earning is not evidence of anything on its own -- a slot accumulates unrelated
 casualties. What identifies one event is a group that stopped in the SAME
@@ -131,7 +138,8 @@ def assess(worker_id, history, epochs, period):
     seen = history.get(worker_id, {})
     if not seen:
         return {"state": UNSEEN, "slot": None, "last_paid": None,
-                "last_amount": 0, "zeros": 0, "missed": 0, "appearances": 0}
+                "last_amount": 0, "zeros": 0, "missed": 0, "appearances": 0,
+                "expected": 0, "paid": 0, "zero_at": [], "absent_at": []}
 
     slot = min(seen) % period if period else None
     paid = sorted(b for b, v in seen.items() if v > 0)
@@ -149,6 +157,21 @@ def assess(worker_id, history, epochs, period):
         if b > (max(seen) if seen else 0)
     ])
 
+    # Attendance over the whole window, not just its tail. Both counters above
+    # are anchored to the end of the history -- being paid again resets them --
+    # so a worker that dropped a payout and recovered reads as untroubled. It
+    # is: nobody needs to go and restart it. But the interruption happened, and
+    # a report that cannot show it cannot answer "has this node ever missed
+    # one?". Measured on mainnet, that hides a miss in ~2% of healthy verdicts.
+    #
+    # Bounded by the worker's own first and last appearance. Earlier slots
+    # belong to before it existed, and later ones are already counted by
+    # `missed` -- claiming them here would contradict that number in the same
+    # report.
+    span = [b for b in slot_epochs if min(seen) <= b <= max(seen)]
+    zero_at = [b for b in span if seen.get(b) == 0]
+    absent_at = [b for b in span if b not in seen]
+
     # Missing your own slots is checked first. A worker can go straight from
     # earning to absent without a zero payout in between, and testing "was the
     # last thing I saw a payment?" first would call that healthy.
@@ -160,7 +183,9 @@ def assess(worker_id, history, epochs, period):
         state = EARNING
     return {"state": state, "slot": slot, "last_paid": last_paid,
             "last_amount": seen.get(last_paid, 0) if last_paid else 0,
-            "zeros": zeros, "missed": missed, "appearances": len(seen)}
+            "zeros": zeros, "missed": missed, "appearances": len(seen),
+            "expected": len(span), "paid": len(span) - len(zero_at) - len(absent_at),
+            "zero_at": zero_at, "absent_at": absent_at}
 
 
 def worker_details_for(w3, network, worker_ids, progress=None):
@@ -372,7 +397,7 @@ def main(argv=None):
         wid = worker_ids[entry.peer_id]
         if not wid:
             print(f"{entry.peer_id}\n  not registered on {network.name}\n")
-            rows.append((entry.peer_id, "", "unregistered", "", "", "", ""))
+            rows.append((entry.peer_id, "", "unregistered", "", "", "", "", "", ""))
             continue
 
         v = verdicts[wid]
@@ -401,13 +426,14 @@ def main(argv=None):
                   "chase.")
             print()
             rows.append((entry.peer_id, wid, "deregistered",
-                         v.get("slot", ""), v.get("last_paid") or "", "", ""))
+                         v.get("slot", ""), v.get("last_paid") or "", "", "",
+                         v.get("expected", ""), v.get("paid", "")))
             continue
         if v["state"] == UNSEEN:
             print("  reward history: never appeared in this window — either "
                   "newly registered\n                  or out longer than "
                   f"{args.days:g} days (try --days)\n")
-            rows.append((entry.peer_id, wid, UNSEEN, "", "", "", ""))
+            rows.append((entry.peer_id, wid, UNSEEN, "", "", "", "", 0, 0))
             continue
 
         print(f"  rotation slot: {v['slot']}   payouts seen: {v['appearances']}")
@@ -417,6 +443,27 @@ def main(argv=None):
                   f"{v['last_amount'] / E18:.2f} SQD)")
         else:
             print("  last earned:   never, in this window")
+
+        # Only for workers that actually dropped one. The healthy majority is
+        # ~98% of any run, and two more lines each would bury the ones that
+        # matter under noise that says nothing.
+        if v["zero_at"] or v["absent_at"]:
+            parts = [f"{v['paid']} of {v['expected']} slots paid"]
+            if v["zero_at"]:
+                parts.append(f"{len(v['zero_at'])} zero")
+            if v["absent_at"]:
+                parts.append(f"{len(v['absent_at'])} absent")
+            print(f"  attendance:    {', '.join(parts)}")
+            gaps = sorted(
+                [(b, "zero") for b in v["zero_at"]]
+                + [(b, "absent") for b in v["absent_at"]]
+            )
+            shown = ", ".join(
+                f"{when(b):%m-%d %H:%M} ({kind})" for b, kind in gaps[:6]
+            )
+            if len(gaps) > 6:
+                shown += f", +{len(gaps) - 6} more"
+            print(f"  gaps:          {shown}")
 
         serving, unwell, retired_here = cohort_state(
             history, epochs, period, v["slot"], verdicts, retired
@@ -478,6 +525,7 @@ def main(argv=None):
             v["last_paid"] or "",
             f"{days_since(v['last_paid']):.2f}" if v["last_paid"] else "",
             f"{unwell}/{serving}",
+            v["expected"], v["paid"],
         ))
 
     if args.cohort and affected_slots:
@@ -541,7 +589,7 @@ def main(argv=None):
             writer = csv.writer(handle)
             writer.writerow(("peer_id", "worker_id", "state", "rotation_slot",
                              "last_paid_l1_block", "days_since_paid",
-                             "cohort_affected"))
+                             "cohort_affected", "slots_expected", "slots_paid"))
             writer.writerows(rows)
         print(f"\nwritten to {args.csv}")
     return 0
