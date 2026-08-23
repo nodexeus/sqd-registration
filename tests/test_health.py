@@ -232,3 +232,95 @@ def test_a_deregistered_worker_is_not_counted_as_a_casualty():
     assert (serving, unwell, retired) == (2, 1, 1)   # 9 in neither part of 2/1
     assert listed == [1]                             # and never named
     assert groups[1000] == [1]                       # nor treated as co-stopped
+
+
+def test_a_worker_that_missed_a_slot_and_recovered_keeps_its_verdict():
+    """The blind spot: both failure counters are anchored to the end of the
+    window, so being paid again resets them. Measured against mainnet over 3
+    days, 40 of 1901 workers called `earning` had missed a payout inside the
+    window. The interruption has to show up somewhere -- but not as an alarm,
+    because a worker that recovered needs nobody to go and restart it."""
+    data = rotating(n_epochs=12)
+    del data[3400][1]                   # absent from its middle slot, then back
+    epochs = epochs_from(data)
+    history = health.build_history(epochs)
+    period = health.rotation_period(epochs, history)
+
+    verdict = health.assess(1, history, epochs, period)
+
+    assert verdict["state"] == health.EARNING       # unchanged: it is fine now
+    assert verdict["expected"] == 3                 # 1000, 3400, 5800
+    assert verdict["paid"] == 2
+    assert verdict["absent_at"] == [3400]
+    assert verdict["zero_at"] == []
+
+
+def test_a_zero_payout_mid_window_is_recorded_separately_from_an_absence():
+    """Being paid nothing and being left out of the payout set have different
+    causes, and on mainnet the zeros outnumber the absences 68 to 1 -- folding
+    them together would throw away nearly all of the signal."""
+    data = rotating(n_epochs=12)
+    data[3400][1] = 0                   # present but paid nothing, then back
+    epochs = epochs_from(data)
+    history = health.build_history(epochs)
+    period = health.rotation_period(epochs, history)
+
+    verdict = health.assess(1, history, epochs, period)
+
+    assert verdict["state"] == health.EARNING
+    assert verdict["expected"] == 3
+    assert verdict["paid"] == 2
+    assert verdict["zero_at"] == [3400]
+    assert verdict["absent_at"] == []
+
+
+def test_a_worker_with_a_clean_record_reports_no_gaps():
+    """Attendance must stay silent for the healthy majority, or the line that
+    matters gets lost in 1900 lines that do not."""
+    epochs = epochs_from(rotating(n_epochs=12))
+    history = health.build_history(epochs)
+    period = health.rotation_period(epochs, history)
+
+    verdict = health.assess(1, history, epochs, period)
+
+    assert verdict["expected"] == verdict["paid"] == 3
+    assert verdict["zero_at"] == verdict["absent_at"] == []
+
+
+def test_attendance_does_not_count_slots_from_before_the_worker_existed():
+    """A worker registered midway through the window never had a turn in the
+    slots that preceded it. Counting those would report a brand new node as
+    having missed most of its payouts."""
+    data = rotating(n_epochs=12)
+    for block in (1000, 3400):
+        del data[block][1]              # only ever appears at 5800
+    epochs = epochs_from(data)
+    history = health.build_history(epochs)
+    period = health.rotation_period(epochs, history)
+
+    verdict = health.assess(1, history, epochs, period)
+
+    assert verdict["state"] == health.EARNING
+    assert verdict["expected"] == 1     # not 3
+    assert verdict["paid"] == 1
+    assert verdict["absent_at"] == []
+
+
+def test_attendance_covers_the_gap_but_stops_at_the_last_appearance():
+    """A worker that is currently out is already reported as dropped, and its
+    trailing absences are counted by `missed`. Attendance must not double-count
+    them, or the two numbers contradict each other in the same report."""
+    data = rotating(n_epochs=12)
+    del data[3400][1]                   # a real gap, recovered
+    del data[5800][1]                   # then out at the end of the window
+    epochs = epochs_from(data)
+    history = health.build_history(epochs)
+    period = health.rotation_period(epochs, history)
+
+    verdict = health.assess(1, history, epochs, period)
+
+    assert verdict["state"] == health.DROPPED    # currently out: still an alarm
+    assert verdict["missed"] == 2                # 3400 and 5800, after its last
+    assert verdict["expected"] == 1              # attendance spans 1000..1000
+    assert verdict["paid"] == 1
+    assert verdict["absent_at"] == []            # not double-counted
