@@ -75,3 +75,5 @@ python analysis/NODEX-259/analyze.py
 For a new capture, run `collect.py`, then `verify_chain.py`, then `analyze.py`. New snapshots will produce different results. The collector pins a capture-time cutoff for commitments; it does not pin live worker metadata. The source commit metadata refers to the implementations inspected for this report, not an automatically detected API deployment version.
 
 Tracked in [NODEX-259](https://linear.app/nodexeus/issue/NODEX-259).
+
+Follow-up: [operator telemetry and network reward authority](TRUST-BOUNDARIES.md) traces whether reported measurements can be falsified and whether authorized network actors can reduce individual rewards.

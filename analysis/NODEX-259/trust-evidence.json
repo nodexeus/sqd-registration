@@ -1,0 +1,76 @@
+{
+  "rpc_read": {
+    "block": 508789255,
+    "address": "0x4de282bD18aE4987B3070F4D5eF8c80756362AEa",
+    "time": "2026-09-25T14:23:45.061307+00:00",
+    "values": {
+      "requiredApproves": 2,
+      "roundRobinBlocks": 256,
+      "windowSize": 1,
+      "router": "0x67F56D27dab93eEb07f6372274aCa277F49dA941",
+      "paused": false
+    }
+  },
+  "sourcify_verification": {
+    "matchId": "5794121",
+    "creationMatch": "exact_match",
+    "runtimeMatch": "exact_match",
+    "verifiedAt": "2024-12-15T21:12:51Z",
+    "match": "exact_match",
+    "chainId": "42161",
+    "address": "0x4de282bD18aE4987B3070F4D5eF8c80756362AEa"
+  },
+  "verified_source_matches_upstream_except_header_comment": true,
+  "verified_source_sha256": "662652838f99c2789b74ecf8784c78655980870162d73d2ca1ad858004e7fde2",
+  "source_revisions": {
+    "worker-rs": "03fdb65c8d3edda9fbd2e1182032007f8e0bc31d",
+    "network-components": "418c84f54e8e516707a73bece33e87c02bd61667",
+    "subsquid-network-contracts": "861cfccdb3a7b2bfe94a49e4fb64ede4f0319401"
+  },
+  "recent_distribution_approvals": [
+    {
+      "event": "NewCommitment",
+      "block": 508784408,
+      "transaction": "0x6956b7e92eff1b0f0c2dba19b01843feef51aa675df7c59768ca9c5cb458f229",
+      "signer": "0x13E46E4488Aa29F98465e1c76263FC4Ff517B953",
+      "fromBlock": 26054188,
+      "toBlock": 26054787
+    },
+    {
+      "event": "Approved",
+      "block": 508784408,
+      "transaction": "0x6956b7e92eff1b0f0c2dba19b01843feef51aa675df7c59768ca9c5cb458f229",
+      "signer": "0x13E46E4488Aa29F98465e1c76263FC4Ff517B953",
+      "fromBlock": 26054188,
+      "toBlock": 26054787
+    },
+    {
+      "event": "Approved",
+      "block": 508784908,
+      "transaction": "0x3e75eb768896776ccaa37a26710fccd48484c873e5eb14ae03b51f0af8cb7b98",
+      "signer": "0x31b53E955cB8776196C4029Ac4E8Ba796b3Ff635",
+      "fromBlock": 26054188,
+      "toBlock": 26054787
+    },
+    {
+      "event": "Distributed",
+      "block": 508784908,
+      "transaction": "0x3e75eb768896776ccaa37a26710fccd48484c873e5eb14ae03b51f0af8cb7b98",
+      "signer": null,
+      "fromBlock": 26054188,
+      "toBlock": 26054787
+    }
+  ],
+  "scheduler_snapshot": {
+    "url": "https://metadata.sqd-datasets.io/scheduler/mainnet/status.json",
+    "config": {
+      "supported_worker_versions": ">=2.13.0",
+      "recommended_worker_versions": ">=2.13.0"
+    },
+    "status_counts": {
+      "online": 1851,
+      "offline": 31
+    },
+    "effective_from": 1790345383
+  }
+}
